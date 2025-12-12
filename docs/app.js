@@ -15,6 +15,11 @@ function setStatus(s){ statusEl.textContent = s; }
 function setMode(s){ modeEl.textContent = s; }
 function setLock(s){ lockEl.textContent = s; }
 
+// figure out what global name the bundle exposes
+const altBase = window.alt1Base || window.Alt1Base || window.alt1base;
+console.log("alt1 base global:", altBase);
+
+
 function rgba(r,g,b,a=255){
   return (r & 255) | ((g & 255) << 8) | ((b & 255) << 16) | ((a & 255) << 24);
 }
