@@ -1,3 +1,10 @@
+console.log("ALT1 present?", !!window.alt1);
+if (window.alt1) {
+  console.log("permissionPixel", alt1.permissionPixel);
+  console.log("permissionOverlay", alt1.permissionOverlay);
+  console.log("permissionGamestate", alt1.permissionGamestate);
+}
+
 /* global alt1, a1lib */
 
 // =======================
@@ -263,3 +270,4 @@ $("stopBtn").onclick = () => {
 $("testFlashBtn").onclick = () => {
   flashOverlay();
 };
+
