@@ -1,5 +1,15 @@
 // ProgFlash - no a1lib dependency
 // Requires: Alt1 + View screen + Show overlay permissions
+if (window.alt1 && typeof alt1.identifyApp === "function") {
+  alt1.identifyApp(JSON.stringify({
+    appName: "ProgFlash",
+    appUrl: "https://maidcatcher.github.io/Alt1-Flash/index.html",
+    configUrl: "https://maidcatcher.github.io/Alt1-Flash/index.html",
+    requestOverlay: true,
+    requestCapture: true
+  }));
+}
+
 
 const statusEl = document.getElementById("status");
 const modeEl   = document.getElementById("mode");
