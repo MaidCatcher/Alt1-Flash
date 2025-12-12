@@ -54,6 +54,10 @@ let anchor = null;
 let lastSeen = 0;
 let loop = null;
 
+let tries = 0;
+let hits = 0;
+
+
 async function start() {
   if (!alt1.permissionPixel || !alt1.permissionOverlay) {
     setStatus("Missing permissions");
@@ -83,6 +87,11 @@ async function start() {
   loop = setInterval(() => {
     const img = captureRs();
     if (!img) return;
+    
+    tries++;
+    hits++;
+dbg(`tries=${tries} hits=${hits}\nlast lock=${hit ? hit.x + "," + hit.y : "none"}`);
+
 
     const hit = findAnchor(img, anchor, { tolerance: 40, stride: 2, minScore: 0.60 });
 
