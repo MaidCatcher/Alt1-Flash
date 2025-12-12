@@ -1,45 +1,5 @@
-function dbg(msg) {
-  const el = document.getElementById("debugBox");
-  if (el) el.textContent = String(msg);
-}
-
-dbg("app.js loaded ✅");
-
-setTimeout(() => {
-  const g = window;
-  dbg(
-    [
-      "Globals check:",
-      `window.alt1 present: ${!!g.alt1}`,
-      `window.alt1Base present: ${!!g.alt1Base}`,
-      `window.Alt1Base present: ${!!g.Alt1Base}`,
-      `window.alt1base present: ${!!g.alt1base}`,
-      "",
-      "Loaded scripts:",
-      ...Array.from(document.scripts).map(s => s.src || "[inline]")
-    ].join("\n")
-  );
-}, 300);
-
 // ProgFlash - no a1lib dependency
 // Requires: Alt1 + View screen + Show overlay permissions
-
-(function () {
-  try {
-    const g = window;
-    const keys = Object.keys(g).filter(k =>
-      k.toLowerCase().includes("alt")
-    );
-
-    console.log("ALT GLOBAL KEYS:", keys);
-    console.log("alt1Base:", g.alt1Base);
-    console.log("Alt1Base:", g.Alt1Base);
-    console.log("alt1base:", g.alt1base);
-  } catch (e) {
-    console.log("debug error", e);
-  }
-})();
-
 
 const statusEl = document.getElementById("status");
 const modeEl   = document.getElementById("mode");
@@ -54,11 +14,6 @@ document.getElementById("bannerApp").style.display = "block";
 function setStatus(s){ statusEl.textContent = s; }
 function setMode(s){ modeEl.textContent = s; }
 function setLock(s){ lockEl.textContent = s; }
-
-// figure out what global name the bundle exposes
-const altBase = window.alt1Base || window.Alt1Base || window.alt1base;
-console.log("alt1 base global:", altBase);
-
 
 function rgba(r,g,b,a=255){
   return (r & 255) | ((g & 255) << 8) | ((b & 255) << 16) | ((a & 255) << 24);
