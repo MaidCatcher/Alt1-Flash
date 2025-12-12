@@ -36,6 +36,17 @@
       Start cutting gems so the bar is visible, then hit <b>Start</b>.
     </small>
   </div>
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    const el = document.createElement("div");
+    el.textContent = "✅ inline JS running";
+    el.style.padding = "6px";
+    el.style.background = "#dfd";
+    el.style.border = "1px solid #9c9";
+    el.style.margin = "8px 0";
+    document.body.prepend(el);
+  });
+</script>
 
   <script src="./app.js"></script>
   <script>
@@ -48,4 +59,5 @@
 
 </body>
 </html>
+
 
