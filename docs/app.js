@@ -63,6 +63,14 @@ async function start() {
   if (!anchor) {
     setStatus("Loading anchor…");
     anchor = await loadImage("./img/progbar_anchor.png");
+    dbg(
+  "Anchor loaded\n" +
+  "w=" + anchor.width + " h=" + anchor.height + "\n" +
+  "alt1: " + !!window.alt1 + "\n" +
+  "overlay: " + alt1.permissionOverlay + "\n" +
+  "capture: " + alt1.permissionPixel
+);
+
   }
 
   running = true;
