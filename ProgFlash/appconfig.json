@@ -1,0 +1,12 @@
+{
+  "appName": "ProgFlash",
+  "description": "Flashes overlay when RS3 skilling progress bar ends (Make-X / gem cutting etc.)",
+  "appUrl": "./index.html",
+  "configUrl": "./index.html",
+  "iconUrl": "https://runeapps.org/alt1/icon.png",
+  "defaultWidth": 360,
+  "defaultHeight": 220,
+  "minWidth": 320,
+  "minHeight": 200,
+  "requestOverlay": true
+}
