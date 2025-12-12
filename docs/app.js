@@ -1,3 +1,26 @@
+function dbg(msg) {
+  const el = document.getElementById("debugBox");
+  if (el) el.textContent = String(msg);
+}
+
+dbg("app.js loaded ✅");
+
+setTimeout(() => {
+  const g = window;
+  dbg(
+    [
+      "Globals check:",
+      `window.alt1 present: ${!!g.alt1}`,
+      `window.alt1Base present: ${!!g.alt1Base}`,
+      `window.Alt1Base present: ${!!g.Alt1Base}`,
+      `window.alt1base present: ${!!g.alt1base}`,
+      "",
+      "Loaded scripts:",
+      ...Array.from(document.scripts).map(s => s.src || "[inline]")
+    ].join("\n")
+  );
+}, 300);
+
 // ProgFlash - no a1lib dependency
 // Requires: Alt1 + View screen + Show overlay permissions
 
