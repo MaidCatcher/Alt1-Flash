@@ -247,6 +247,19 @@ function stop() {
 testBtn.onclick = () => { setStatus("Test flash"); flashOverlay(); };
 startBtn.onclick = () => { start().catch(e => { console.error(e); setStatus("Error (see console)"); }); };
 stopBtn.onclick = stop;
+if (window.alt1) {
+  alt1.overLaySetGroup("test");
+  alt1.overLayRect(
+    0xAAFF0000, // solid red
+    alt1.rsX || 0,
+    alt1.rsY || 0,
+    300,
+    200,
+    2000,
+    5
+  );
+}
+
 
 // Startup
 setStatus("Idle");
