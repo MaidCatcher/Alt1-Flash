@@ -129,6 +129,8 @@ stopBtn.onclick = () => {
   stopBtn.disabled = true;
 };
 
+document.getElementById("testFlashBtn").onclick = testFlash;
+
 // --- startup ---
 statusEl.textContent = "Idle";
 modeEl.textContent = "Not running";
@@ -138,4 +140,5 @@ document.body.insertAdjacentHTML(
   "afterbegin",
   "<div style='padding:6px;background:#ddf;border:1px solid #99c'>✅ app.js running</div>"
 );
+
 
