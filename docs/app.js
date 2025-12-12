@@ -84,7 +84,8 @@ async function start() {
     const img = captureRs();
     if (!img) return;
 
-    const hit = findAnchor(img, anchor);
+    const hit = findAnchor(img, anchor, { tolerance: 40, stride: 2, minScore: 0.60 });
+
     if (hit) {
       lastSeen = Date.now();
       setStatus("Locked");
