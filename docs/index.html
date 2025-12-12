@@ -38,5 +38,14 @@
   </div>
 
   <script src="./app.js"></script>
+  <script>
+  window.onerror = function(msg, src, line, col, err){
+    document.body.insertAdjacentHTML("beforeend",
+      "<pre style='white-space:pre-wrap;background:#fee;padding:8px;border:1px solid #f99;'>JS ERROR: "
+      + msg + "\n" + src + ":" + line + ":" + col + "</pre>");
+  };
+</script>
+
 </body>
 </html>
+
