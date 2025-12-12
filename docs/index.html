@@ -47,6 +47,18 @@
     document.body.prepend(el);
   });
 </script>
+  <script>
+  window.onerror = function(msg, src, line, col, err){
+    const pre = document.createElement("pre");
+    pre.style.whiteSpace = "pre-wrap";
+    pre.style.background = "#fee";
+    pre.style.border = "1px solid #f99";
+    pre.style.padding = "8px";
+    pre.textContent = `JS ERROR: ${msg}\n${src}:${line}:${col}`;
+    document.body.prepend(pre);
+  };
+</script>
+
 
   <script src="./app.js"></script>
   <script>
@@ -59,5 +71,6 @@
 
 </body>
 </html>
+
 
 
