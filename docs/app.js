@@ -1,6 +1,23 @@
 // ProgFlash - no a1lib dependency
 // Requires: Alt1 + View screen + Show overlay permissions
 
+(function () {
+  try {
+    const g = window;
+    const keys = Object.keys(g).filter(k =>
+      k.toLowerCase().includes("alt")
+    );
+
+    console.log("ALT GLOBAL KEYS:", keys);
+    console.log("alt1Base:", g.alt1Base);
+    console.log("Alt1Base:", g.Alt1Base);
+    console.log("alt1base:", g.alt1base);
+  } catch (e) {
+    console.log("debug error", e);
+  }
+})();
+
+
 const statusEl = document.getElementById("status");
 const modeEl   = document.getElementById("mode");
 const lockEl   = document.getElementById("lock");
