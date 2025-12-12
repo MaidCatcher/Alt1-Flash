@@ -9,10 +9,9 @@
     .row { margin: 10px 0; }
     .status { padding: 8px; background:#f2f2f2; border-radius: 6px; }
     code { background:#eee; padding:2px 4px; border-radius: 4px; }
+    .banner-ok { padding:6px; background:#dfd; border:1px solid #9c9; margin:8px 0; }
+    .banner-js { padding:6px; background:#ddf; border:1px solid #99c; margin:8px 0; }
   </style>
-
-  <!-- Alt1 libs (RuneApps) -->
-
 </head>
 <body>
   <h3>ProgFlash</h3>
@@ -35,45 +34,26 @@
       Start cutting gems so the bar is visible, then hit <b>Start</b>.
     </small>
   </div>
-<script>
-  document.addEventListener("DOMContentLoaded", () => {
-    const el = document.createElement("div");
-    el.textContent = "✅ inline JS running";
-    el.style.padding = "6px";
-    el.style.background = "#dfd";
-    el.style.border = "1px solid #9c9";
-    el.style.margin = "8px 0";
-    document.body.prepend(el);
-  });
-</script>
-  <script>
-  window.onerror = function(msg, src, line, col, err){
-    const pre = document.createElement("pre");
-    pre.style.whiteSpace = "pre-wrap";
-    pre.style.background = "#fee";
-    pre.style.border = "1px solid #f99";
-    pre.style.padding = "8px";
-    pre.textContent = `JS ERROR: ${msg}\n${src}:${line}:${col}`;
-    document.body.prepend(pre);
-  };
-</script>
 
-<script src="https://cdn.jsdelivr.net/npm/@alt1/base@1.0.0-alpha.7/dist/index.bundle.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@alt1/base@latest/dist/index.bundle.js"></script>
+  <div id="bannerInline" class="banner-ok">✅ inline JS running</div>
+  <div id="bannerApp" class="banner-js" style="display:none;">✅ app.js running</div>
+
+  <script>
+    // Show JS errors inside the app UI (Alt1 doesn't always surface them nicely)
+    window.onerror = function(msg, src, line, col, err){
+      const pre = document.createElement("pre");
+      pre.style.whiteSpace = "pre-wrap";
+      pre.style.background = "#fee";
+      pre.style.border = "1px solid #f99";
+      pre.style.padding = "8px";
+      pre.textContent = `JS ERROR: ${msg}\n${src}:${line}:${col}`;
+      document.body.prepend(pre);
+    };
+  </script>
+
+  <!-- Alt1 base (kept for future; this app does not depend on it to run) -->
+  <script src="https://cdn.jsdelivr.net/npm/@alt1/base@latest/dist/index.bundle.js"></script>
 
   <script src="./app.js"></script>
-  <script>
-  window.onerror = function(msg, src, line, col, err){
-    document.body.insertAdjacentHTML("beforeend",
-      "<pre style='white-space:pre-wrap;background:#fee;padding:8px;border:1px solid #f99;'>JS ERROR: "
-      + msg + "\n" + src + ":" + line + ":" + col + "</pre>");
-  };
-</script>
-
 </body>
 </html>
-
-
-
-
-

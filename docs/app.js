@@ -1,13 +1,6 @@
-// --- sanity check ---
-if (!window.alt1) {
-  document.body.insertAdjacentHTML(
-    "afterbegin",
-    "<div style='padding:8px;background:#fcc;border:1px solid #c99'>Not running in Alt1</div>"
-  );
-  throw new Error("Not running in Alt1");
-}
+// ProgFlash - no a1lib dependency
+// Requires: Alt1 + View screen + Show overlay permissions
 
-// --- UI refs ---
 const statusEl = document.getElementById("status");
 const modeEl   = document.getElementById("mode");
 const lockEl   = document.getElementById("lock");
@@ -16,84 +9,34 @@ const startBtn = document.getElementById("startBtn");
 const stopBtn  = document.getElementById("stopBtn");
 const testBtn  = document.getElementById("testFlashBtn");
 
-let running = false;
+document.getElementById("bannerApp").style.display = "block";
 
-// --- helpers ---
-function rgba(r, g, b, a = 255) {
+function setStatus(s){ statusEl.textContent = s; }
+function setMode(s){ modeEl.textContent = s; }
+function setLock(s){ lockEl.textContent = s; }
+
+function rgba(r,g,b,a=255){
   return (r & 255) | ((g & 255) << 8) | ((b & 255) << 16) | ((a & 255) << 24);
 }
 
-function rgba(r, g, b, a = 255) {
-  return (r & 255) |
-         ((g & 255) << 8) |
-         ((b & 255) << 16) |
-         ((a & 255) << 24);
-}
-
-function testFlash() {
-  if (!window.alt1) {
-    alert("Not running inside Alt1");
-    return;
-  }
-  if (!alt1.permissionOverlay) {
-    alert("Overlay permission not granted");
-    return;
-  }
-
-  const group = "progflash_test";
-  let on = false;
-  let ticks = 0;
-
-  const timer = setInterval(() => {
-    alt1.overLaySetGroup(group);
-
-    if (on) {
-      alt1.overLayClearGroup(group);
-    } else {
-      // BIG full-client flash so it is impossible to miss
-      alt1.overLayRect(
-        rgba(255, 0, 0, 160),
-        alt1.rsX,
-        alt1.rsY,
-        alt1.rsWidth,
-        alt1.rsHeight,
-        250,
-        0
-      );
-    }
-
-    on = !on;
-    ticks++;
-
-    if (ticks > 6) {
-      alt1.overLayClearGroup(group);
-      clearInterval(timer);
-    }
-  }, 250);
-}
-
 function flashOverlay() {
-  if (!alt1.permissionOverlay) {
-    alert("Overlay permission not granted");
-    return;
-  }
+  if (!window.alt1) { alert("Not running inside Alt1."); return; }
+  if (!alt1.permissionOverlay) { alert("Overlay permission not granted."); return; }
 
   const group = "progflash";
   let i = 0;
   const flashes = 6;
+  const interval = 200;
 
   const t = setInterval(() => {
     alt1.overLaySetGroup(group);
     if (i % 2 === 0) {
-      alt1.overLayRect(
-        rgba(255, 0, 0, 140),
-        alt1.rsX + 10,
-        alt1.rsY + 10,
-        400,
-        200,
-        200,
-        4
-      );
+      // Flash the RS client area
+      const x = alt1.rsX || 0;
+      const y = alt1.rsY || 0;
+      const w = alt1.rsWidth  || 800;
+      const h = alt1.rsHeight || 600;
+      alt1.overLayRect(rgba(255, 0, 0, 160), x, y, w, h, interval, 0);
     } else {
       alt1.overLayClearGroup(group);
     }
@@ -102,184 +45,210 @@ function flashOverlay() {
       alt1.overLayClearGroup(group);
       clearInterval(t);
     }
-  }, 200);
+  }, interval);
 }
 
-// --- buttons ---
-testBtn.onclick = () => {
-  statusEl.textContent = "Test flash";
-  flashOverlay();
-};
-
-// --- progress bar detection using @alt1/base ---
-let anchorImg = null;
-let anchorFinder = null;
-let lockedRect = null;
-let tickTimer = null;
-
-async function initDetector() {
-  // alt1-base exposes global `alt1` already, and usually `alt1base` bundle exports as `alt1Base`
-  // In the bundled build, image loading helper is available via `Alt1` namespace.
-  // We'll load the anchor as an Image and use Alt1's image matching.
-
-  anchorImg = new Image();
-  anchorImg.src = "./img/progbar_anchor.png?v=1";
-  await anchorImg.decode();
-
-  // If alt1lib is present, we can use ImgRef (classic). If not, we use base capture APIs.
-  if (window.ImgRef) {
-    anchorFinder = new ImgRef(anchorImg);
-  } else {
-    anchorFinder = anchorImg; // fallback; we'll use findSubimage via a1lib/base if available
+// ---- Anchor image -> BGRA base64 (Alt1 bindFindSubImg expects BGRA8 base64) ----
+function imgDataToAlt1BGRA8Base64(imgData) {
+  const { data, width, height } = imgData;
+  const out = new Uint8Array(width * height * 4);
+  for (let i = 0; i < width * height; i++) {
+    const r = data[i * 4 + 0];
+    const g = data[i * 4 + 1];
+    const b = data[i * 4 + 2];
+    const a = data[i * 4 + 3];
+    out[i * 4 + 0] = b;
+    out[i * 4 + 1] = g;
+    out[i * 4 + 2] = r;
+    out[i * 4 + 3] = a;
   }
+  // base64
+  let binary = "";
+  for (let i = 0; i < out.length; i++) binary += String.fromCharCode(out[i]);
+  return btoa(binary);
 }
 
-function setStatus(s) { statusEl.textContent = s; }
-function setMode(s) { modeEl.textContent = s; }
-function setLock(s) { lockEl.textContent = s; }
+async function loadAnchorAsAlt1Buffer(url) {
+  const img = new Image();
+  img.src = url + "?v=" + Date.now(); // bust caches
+  await img.decode();
 
-function captureRs() {
-  // Prefer alt1's built-in capture (available when View screen is enabled)
-  // captureHoldFullRs returns ImageData-like object in classic libs; in newer builds alt1.capture is used.
-  if (window.a1lib && a1lib.captureHoldFullRs) return a1lib.captureHoldFullRs();
-  if (alt1.capture && alt1.captureHoldFullRs) return alt1.captureHoldFullRs(); // some builds
-  if (alt1.capture && alt1.capture) return alt1.capture(); // generic
-  // If none exists, we can't detect.
+  const c = document.createElement("canvas");
+  c.width = img.width;
+  c.height = img.height;
+  const ctx = c.getContext("2d");
+  ctx.drawImage(img, 0, 0);
+  const imgData = ctx.getImageData(0, 0, c.width, c.height);
+
+  return { w: c.width, h: c.height, b64: imgDataToAlt1BGRA8Base64(imgData) };
+}
+
+// ---- Detection state ----
+let running = false;
+let anchor = null;
+let regionId = null;
+let lockPos = null;     // {x,y} in RS-client coords (not screen coords)
+let lastSeen = 0;
+let loopTimer = null;
+
+// helpers: normalize bindFindSubImg return formats
+function parseFindResult(res) {
+  // Common formats seen in the wild:
+  // - string: "x,y"
+  // - object: {x:..., y:...}
+  // - array:  [x,y]
+  // - number: -1 or 0
+  if (res == null) return null;
+  if (typeof res === "string") {
+    if (!res.includes(",")) return null;
+    const [xs, ys] = res.split(",");
+    const x = parseInt(xs, 10);
+    const y = parseInt(ys, 10);
+    if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+    return null;
+  }
+  if (Array.isArray(res) && res.length >= 2) {
+    const x = Number(res[0]), y = Number(res[1]);
+    if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+    return null;
+  }
+  if (typeof res === "object" && "x" in res && "y" in res) {
+    const x = Number(res.x), y = Number(res.y);
+    if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+    return null;
+  }
   return null;
 }
 
-function findAnchor(img) {
-  // If classic ImgRef exists, use it
-  if (window.a1lib && a1lib.findSubimage && anchorFinder) {
-    // (img, imgref) -> match object
-    return a1lib.findSubimage(img, anchorFinder);
-  }
+function ensureRegion() {
+  // bind full RS client region once
+  if (regionId != null) return regionId;
 
-  // If `findSubimage` is available globally (some bundles expose it)
-  if (window.findSubimage && anchorFinder) {
-    return window.findSubimage(img, anchorFinder);
-  }
+  if (!alt1.bindRegion) return null;
 
-  // No matcher available
-  return null;
+  const w = alt1.rsWidth  || 0;
+  const h = alt1.rsHeight || 0;
+  if (!w || !h) return null;
+
+  regionId = alt1.bindRegion(0, 0, w, h);
+  return regionId;
 }
 
-function inLockedArea(match) {
-  // define a rectangle around the bar based on anchor position
-  // Adjust numbers as needed for your UI scale
-  const x = match.x - 5;
-  const y = match.y - 5;
-  const w = 230;
-  const h = 26;
-  return { x, y, w, h };
+function findAnchorOnce() {
+  const id = ensureRegion();
+  if (id == null) return null;
+  if (!alt1.bindFindSubImg) return null;
+  if (!anchor) return null;
+
+  const w = alt1.rsWidth  || 0;
+  const h = alt1.rsHeight || 0;
+  // search entire client for now (we can optimize after lock)
+  const res = alt1.bindFindSubImg(id, anchor.b64, anchor.w, 0, 0, w, h);
+  const pt = parseFindResult(res);
+  return pt;
 }
 
-function startLoop() {
-  if (!alt1.permissionPixel) { alert("Need View screen permission"); return; }
-  if (!alt1.permissionOverlay) { alert("Need Show overlay permission"); return; }
+function drawDebugBox(x, y, w, h) {
+  if (!alt1.permissionOverlay) return;
+  alt1.overLaySetGroup("progflash_debug");
+  alt1.overLayRect(rgba(0, 120, 255, 200), (alt1.rsX||0)+x, (alt1.rsY||0)+y, w, h, 500, 2);
+}
+
+function clearDebug() {
+  if (!alt1.permissionOverlay) return;
+  alt1.overLaySetGroup("progflash_debug");
+  alt1.overLayClearGroup("progflash_debug");
+}
+
+async function start() {
+  if (!window.alt1) { alert("Open this inside Alt1."); return; }
+  if (!alt1.permissionPixel) { alert("Need View screen permission."); return; }
+  if (!alt1.permissionOverlay) { alert("Need Show overlay permission."); return; }
+  if (!alt1.bindFindSubImg || !alt1.bindRegion) {
+    alert("Your Alt1 build doesn't expose bindFindSubImg/bindRegion.\nProgress-bar detection won't work on this build.");
+    return;
+  }
+
+  if (!anchor) {
+    setStatus("Loading anchor...");
+    anchor = await loadAnchorAsAlt1Buffer("./img/progbar_anchor.png");
+  }
 
   running = true;
   startBtn.disabled = true;
   stopBtn.disabled = false;
 
-  setStatus("Searching...");
   setMode("Running");
+  setStatus("Searching...");
   setLock("none");
+  lockPos = null;
+  lastSeen = 0;
 
-  let lastSeen = 0;
+  loopTimer = setInterval(() => {
+    if (!running) return;
 
-  tickTimer = setInterval(() => {
-    const img = captureRs();
-    if (!img) {
-      setStatus("No capture available");
-      return;
-    }
+    const pt = findAnchorOnce();
 
-    // If not locked: find anchor anywhere
-    if (!lockedRect) {
-      const match = findAnchor(img);
-      if (match && match.confidence !== undefined ? match.confidence > 0.85 : true) {
-        lockedRect = inLockedArea(match);
-        setLock(`x=${lockedRect.x}, y=${lockedRect.y}`);
-        setStatus("Locked");
+    if (!lockPos) {
+      if (pt) {
+        lockPos = pt;
         lastSeen = Date.now();
+        setStatus("Locked");
+        setLock(`x=${pt.x}, y=${pt.y}`);
+        drawDebugBox(pt.x, pt.y, anchor.w, anchor.h);
       } else {
         setStatus("Searching...");
       }
       return;
     }
 
-    // Locked: check presence again (either by re-finding anchor or sampling pixels)
-    const match = findAnchor(img);
-    const present = !!match;
-
-    if (present) {
+    // When locked: keep checking anchor presence. If it disappears briefly, treat as end.
+    if (pt) {
       lastSeen = Date.now();
       setStatus("Locked");
+      // draw at current match point (bar shifts a little sometimes)
+      drawDebugBox(pt.x, pt.y, anchor.w, anchor.h);
       return;
     }
 
-    // If not present for a short grace period => treat as ended
-    if (Date.now() - lastSeen > 400) {
+    // not found this frame
+    const ms = Date.now() - lastSeen;
+    if (ms > 450) {
+      // progress finished or bar not visible anymore
       flashOverlay();
       setStatus("Flashed!");
-      // reset lock so next cycle can find it again
-      lockedRect = null;
+      lockPos = null;
       lastSeen = 0;
+      clearDebug();
+    } else {
+      setStatus("Lost (waiting)...");
     }
-
   }, 150);
 }
 
-function stopLoop() {
+function stop() {
   running = false;
+  if (loopTimer) clearInterval(loopTimer);
+  loopTimer = null;
+  regionId = null;
+  lockPos = null;
+  lastSeen = 0;
+
   startBtn.disabled = false;
   stopBtn.disabled = true;
-  lockedRect = null;
-  if (tickTimer) clearInterval(tickTimer);
-  tickTimer = null;
+
   setStatus("Idle");
   setMode("Not running");
   setLock("none");
+  clearDebug();
 }
 
-// Wire buttons
-startBtn.onclick = async () => {
-  if (!anchorImg) await initDetector();
-  startLoop();
-};
-stopBtn.onclick = stopLoop;
+// Button wiring
+testBtn.onclick = () => { setStatus("Test flash"); flashOverlay(); };
+startBtn.onclick = () => { start().catch(e => { console.error(e); setStatus("Error (see console)"); }); };
+stopBtn.onclick = stop;
 
-
-startBtn.onclick = () => {
-  running = true;
-  statusEl.textContent = "Running";
-  modeEl.textContent = "Armed";
-  lockEl.textContent = "none";
-  startBtn.disabled = true;
-  stopBtn.disabled = false;
-};
-
-stopBtn.onclick = () => {
-  running = false;
-  statusEl.textContent = "Idle";
-  modeEl.textContent = "Not running";
-  lockEl.textContent = "none";
-  startBtn.disabled = false;
-  stopBtn.disabled = true;
-};
-
-document.getElementById("testFlashBtn").onclick = testFlash;
-
-// --- startup ---
-statusEl.textContent = "Idle";
-modeEl.textContent = "Not running";
-lockEl.textContent = "none";
-
-document.body.insertAdjacentHTML(
-  "afterbegin",
-  "<div style='padding:6px;background:#ddf;border:1px solid #99c'>✅ app.js running</div>"
-);
-
-
-
+// Startup
+setStatus("Idle");
+setMode("Not running");
+setLock("none");
