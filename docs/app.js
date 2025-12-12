@@ -23,6 +23,55 @@ function rgba(r, g, b, a = 255) {
   return (r & 255) | ((g & 255) << 8) | ((b & 255) << 16) | ((a & 255) << 24);
 }
 
+function rgba(r, g, b, a = 255) {
+  return (r & 255) |
+         ((g & 255) << 8) |
+         ((b & 255) << 16) |
+         ((a & 255) << 24);
+}
+
+function testFlash() {
+  if (!window.alt1) {
+    alert("Not running inside Alt1");
+    return;
+  }
+  if (!alt1.permissionOverlay) {
+    alert("Overlay permission not granted");
+    return;
+  }
+
+  const group = "progflash_test";
+  let on = false;
+  let ticks = 0;
+
+  const timer = setInterval(() => {
+    alt1.overLaySetGroup(group);
+
+    if (on) {
+      alt1.overLayClearGroup(group);
+    } else {
+      // BIG full-client flash so it is impossible to miss
+      alt1.overLayRect(
+        rgba(255, 0, 0, 160),
+        alt1.rsX,
+        alt1.rsY,
+        alt1.rsWidth,
+        alt1.rsHeight,
+        250,
+        0
+      );
+    }
+
+    on = !on;
+    ticks++;
+
+    if (ticks > 6) {
+      alt1.overLayClearGroup(group);
+      clearInterval(timer);
+    }
+  }, 250);
+}
+
 function flashOverlay() {
   if (!alt1.permissionOverlay) {
     alert("Overlay permission not granted");
@@ -89,3 +138,4 @@ document.body.insertAdjacentHTML(
   "afterbegin",
   "<div style='padding:6px;background:#ddf;border:1px solid #99c'>✅ app.js running</div>"
 );
+
