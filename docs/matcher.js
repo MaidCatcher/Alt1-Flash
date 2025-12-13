@@ -35,14 +35,20 @@ export function findAnchor(haystack, needleImg) {
       let match = 0;
       for (let i = 0; i < needle.length; i += step * 4) {
         const hi = ((y * cw + x) * 4) + i;
-        if (
-          haystack.data[hi] === needle[i] &&
-          haystack.data[hi + 1] === needle[i + 1] &&
-          haystack.data[hi + 2] === needle[i + 2]
-        ) match++;
+        const tol = 18; // ← THIS makes it work
+
+if (
+  Math.abs(haystack.data[hi]     - needle[i])     <= tol &&
+  Math.abs(haystack.data[hi + 1] - needle[i + 1]) <= tol &&
+  Math.abs(haystack.data[hi + 2] - needle[i + 2]) <= tol
+) {
+  match++;
+}
+
       }
       if (match > 20) return { x, y, w: nc.width, h: nc.height };
     }
   }
   return null;
 }
+
