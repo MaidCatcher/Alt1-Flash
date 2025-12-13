@@ -4,6 +4,10 @@ const statusEl = document.getElementById("status");
 const modeEl   = document.getElementById("mode");
 const lockEl   = document.getElementById("lock");
 const dbgEl    = document.getElementById("debugBox");
+if (alt1.permissionOverlay) {
+  alt1.overLayClearGroup("progflash_debug");
+}
+
 
 const startBtn = document.getElementById("startBtn");
 const stopBtn  = document.getElementById("stopBtn");
