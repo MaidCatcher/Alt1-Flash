@@ -1,4 +1,6 @@
-import { captureRs, loadImage, findAnchor } from "./matcher.js";
+const img = window.captureRs();
+const hit = window.findAnchor(img, anchor, {...});
+
 
 const statusEl = document.getElementById("status");
 const modeEl   = document.getElementById("mode");
