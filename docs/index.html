@@ -8,12 +8,10 @@
     button { padding: 8px 10px; margin-right: 8px; }
     .row { margin: 10px 0; }
     .status { padding: 8px; background:#f2f2f2; border-radius: 6px; }
-    code { background:#eee; padding:2px 4px; border-radius: 4px; }
+    pre { white-space: pre-wrap; background:#000; color:#00ff00; padding:8px; border-radius: 6px; }
+    .err { white-space: pre-wrap; background:#fee; border:1px solid #f99; padding:8px; border-radius:6px; }
+    code { background:#eee; padding:2px 4px; border-radius:4px; }
   </style>
-
-  <!-- Alt1 libs (RuneApps) -->
-  <script src="https://runeapps.org/alt1/alt1lib.js"></script>
-  <script src="https://runeapps.org/alt1/a1lib.js"></script>
 </head>
 <body>
   <h3>ProgFlash</h3>
@@ -32,48 +30,22 @@
 
   <div class="row">
     <small>
-      Put <code>img/progbar_anchor.png</code> as a small crop of the progress bar’s left edge/cap (UI scale 100%).
-      Start cutting gems so the bar is visible, then hit <b>Start</b>.
+      Put <code>img/progbar_anchor.png</code> as a tiny crop of the bar’s left cap. Start crafting so the bar is visible, then hit <b>Start</b>.
     </small>
   </div>
-<script>
-  document.addEventListener("DOMContentLoaded", () => {
-    const el = document.createElement("div");
-    el.textContent = "✅ inline JS running";
-    el.style.padding = "6px";
-    el.style.background = "#dfd";
-    el.style.border = "1px solid #9c9";
-    el.style.margin = "8px 0";
-    document.body.prepend(el);
-  });
-</script>
+
+  <pre id="debugBox">Loading…</pre>
+
   <script>
-  window.onerror = function(msg, src, line, col, err){
-    const pre = document.createElement("pre");
-    pre.style.whiteSpace = "pre-wrap";
-    pre.style.background = "#fee";
-    pre.style.border = "1px solid #f99";
-    pre.style.padding = "8px";
-    pre.textContent = `JS ERROR: ${msg}\n${src}:${line}:${col}`;
-    document.body.prepend(pre);
-  };
-</script>
+    window.onerror = function(msg, src, line, col){
+      const pre = document.createElement("pre");
+      pre.className = "err";
+      pre.textContent = `JS ERROR: ${msg}\n${src}:${line}:${col}`;
+      document.body.prepend(pre);
+    };
+  </script>
 
-<script src="https://cdn.jsdelivr.net/npm/@alt1/base@1.0.0-alpha.7/dist/index.bundle.js"></script>
-
+  <!-- IMPORTANT: app.js uses import, so it MUST be loaded as a module -->
   <script type="module" src="./app.js"></script>
-  <script>
-  window.onerror = function(msg, src, line, col, err){
-    document.body.insertAdjacentHTML("beforeend",
-      "<pre style='white-space:pre-wrap;background:#fee;padding:8px;border:1px solid #f99;'>JS ERROR: "
-      + msg + "\n" + src + ":" + line + ":" + col + "</pre>");
-  };
-</script>
-
 </body>
 </html>
-
-
-
-
-
