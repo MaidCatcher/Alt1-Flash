@@ -3,18 +3,14 @@
 function toImageData(maybe) {
   if (!maybe) return null;
 
-  // Already ImageData-like
+  // ImageData-like already
   if (maybe.data && typeof maybe.width === "number" && typeof maybe.height === "number") {
     return maybe;
   }
 
-  // Alt1 capture-handle conversions (vary by Alt1 build)
-  try {
-    if (typeof maybe.toData === "function") return maybe.toData();
-  } catch {}
-  try {
-    if (typeof maybe.toImageData === "function") return maybe.toImageData();
-  } catch {}
+  // Alt1 capture-handle conversions (varies by build)
+  try { if (typeof maybe.toData === "function") return maybe.toData(); } catch {}
+  try { if (typeof maybe.toImageData === "function") return maybe.toImageData(); } catch {}
 
   return null;
 }
@@ -23,52 +19,44 @@ export function captureRs() {
   if (!window.alt1) return null;
   if (!alt1.permissionPixel) return null;
 
-  const x = Number.isFinite(alt1.rsX) ? alt1.rsX : 0;
-  const y = Number.isFinite(alt1.rsY) ? alt1.rsY : 0;
   const w = Number.isFinite(alt1.rsWidth) ? alt1.rsWidth : 0;
   const h = Number.isFinite(alt1.rsHeight) ? alt1.rsHeight : 0;
+  if (!w || !h) return null;
 
-  // If RS viewport info isn't available, try a generic captureHold fallback.
-  if (!w || !h) {
-    try {
-      if (typeof alt1.captureHold === "function") {
-        const out = alt1.captureHold();
-        const img = toImageData(out);
-        if (img) return img;
-      }
-    } catch {}
-    return null;
-  }
+  const sx = Number.isFinite(alt1.rsX) ? alt1.rsX : 0;
+  const sy = Number.isFinite(alt1.rsY) ? alt1.rsY : 0;
 
-  // Prefer region capture of the RS viewport
-  // Try alt1.capture first
+  // 1) Try SCREEN coordinates (some Alt1 builds expect absolute screen coords)
   try {
+    if (typeof alt1.captureHold === "function") {
+      const out = alt1.captureHold(sx, sy, w, h);
+      const img = toImageData(out);
+      if (img) return img;
+    }
     if (typeof alt1.capture === "function") {
-      const out = alt1.capture(x, y, w, h);
+      const out = alt1.capture(sx, sy, w, h);
       const img = toImageData(out);
       if (img) return img;
     }
   } catch {}
 
-  // Then try alt1.captureHold with region args
+  // 2) Try CLIENT-relative coordinates (0,0 at the RS client area)
   try {
     if (typeof alt1.captureHold === "function") {
-      const out = alt1.captureHold(x, y, w, h);
+      const out = alt1.captureHold(0, 0, w, h);
       const img = toImageData(out);
       if (img) return img;
     }
-  } catch {}
-
-  // Last resort: captureHold() without args
-  try {
-    if (typeof alt1.captureHold === "function") {
-      const out = alt1.captureHold();
+    if (typeof alt1.capture === "function") {
+      const out = alt1.capture(0, 0, w, h);
       const img = toImageData(out);
       if (img) return img;
     }
   } catch {}
 
   return null;
+}
+
 }
 
 export async function loadImage(url) {
