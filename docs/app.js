@@ -211,6 +211,20 @@ setStatus("Idle");
 setMode("Not running");
 setLock("none");
 
+// If matcher loads after app.js, update status when it's available.
+(function waitForMatcher() {
+  if (typeof window.progflashCaptureRs === "function" &&
+      typeof window.progflashLoadImage === "function" &&
+      typeof window.progflashFindAnchor === "function") {
+    if (statusEl && statusEl.textContent.includes("matcher.js")) {
+      setStatus("Idle");
+    }
+    return;
+  }
+  setTimeout(waitForMatcher, 50);
+})();
+
+
 if (window.alt1) {
   dbg(
     `ProgFlash v=${APP_V}\n` +
