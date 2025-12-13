@@ -28,9 +28,10 @@ function imgToData(img) {
 }
 
 export function findAnchor(hay, needleImg, opts = {}) {
-  const tol = opts.tolerance ?? 18;
-  const stride = opts.stride ?? 3;
-  const minScore = opts.minScore ?? 0.78;
+const tol = opts.tolerance ?? 50;
+const stride = opts.stride ?? 1;
+const minScore = opts.minScore ?? 0.50;
+
 
   const n = imgToData(needleImg);
   const pts = [];
@@ -53,11 +54,17 @@ export function findAnchor(hay, needleImg, opts = {}) {
       let ok = 0;
       for (const [x, y, r, g, b] of pts) {
         const hi = ((y0 + y) * hw + (x0 + x)) * 4;
-        if (
-          Math.abs(hay.data[hi] - r) <= tol &&
-          Math.abs(hay.data[hi + 1] - g) <= tol &&
-          Math.abs(hay.data[hi + 2] - b) <= tol
-        ) ok++;
+        // Alt1 capture is typically BGRA (Blue, Green, Red, Alpha)
+const hb = hay.data[hi + 0];
+const hg = hay.data[hi + 1];
+const hr = hay.data[hi + 2];
+
+if (
+  Math.abs(hr - r) <= tol &&
+  Math.abs(hg - g) <= tol &&
+  Math.abs(hb - b) <= tol
+) ok++;
+
       }
       if (ok / pts.length >= minScore)
         return { x: x0, y: y0, w: n.width, h: n.height };
