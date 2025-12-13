@@ -54,16 +54,17 @@ const minScore = opts.minScore ?? 0.50;
       let ok = 0;
       for (const [x, y, r, g, b] of pts) {
         const hi = ((y0 + y) * hw + (x0 + x)) * 4;
-        // Alt1 capture is typically BGRA (Blue, Green, Red, Alpha)
-const hb = hay.data[hi + 0];
+        
+const hr = hay.data[hi + 0];
 const hg = hay.data[hi + 1];
-const hr = hay.data[hi + 2];
+const hb = hay.data[hi + 2];
 
 if (
   Math.abs(hr - r) <= tol &&
   Math.abs(hg - g) <= tol &&
   Math.abs(hb - b) <= tol
 ) ok++;
+
 
       }
       if (ok / pts.length >= minScore)
