@@ -31,7 +31,7 @@ const FLASH_COOLDOWN_MS = 1500;
 
 function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
 
-async function flashOverlay({ cycles = 3, intervalMs = 250 } = {}) {
+async function flashOverlay({ cycles = 6, intervalMs = 250 } = {}) {
   if (!window.alt1) { alert("Open this inside Alt1."); return; }
 
   if (!alt1.permissionOverlay) {
@@ -39,7 +39,7 @@ async function flashOverlay({ cycles = 3, intervalMs = 250 } = {}) {
     return;
   }
 
-  // Hard cooldown so we never retrigger rapidly (helps with Focus/DND flicker)
+  // Hard cooldown so we never retrigger rapidly (helps a LOT with the DND flicker symptom)
   const now = Date.now();
   if (now - lastFlashAt < FLASH_COOLDOWN_MS) return;
   lastFlashAt = now;
@@ -49,28 +49,22 @@ async function flashOverlay({ cycles = 3, intervalMs = 250 } = {}) {
   flashing = true;
 
   const g = "progflash_flash";
+  const colorBlue = -16776961; // 0xFF0000FF as signed int
 
   try {
-    // Flash a small overlay element (text) instead of a full-screen rect.
-    // Full-screen rapid redraws are more likely to upset Windows focus/notifications.
     for (let i = 0; i < cycles; i++) {
-      alt1.overLayClearGroup(g);
-      alt1.overLayTextEx(
-        "PROGFLASH",
-        (typeof alt1.overlayColor === "function" ? alt1.overlayColor(255,0,0,255) : rgba(255,0,0,255)),
-        22,
-        (alt1.rsX || 0) + 30,
-        (alt1.rsY || 0) + 30,
-        2000,
-        g
-      );
+      // Draw
+      alt1.overLaySetGroup(g);
+      alt1.overLayText("PROGFLASH", colorBlue, 22, 30, 53, intervalMs * 2 + 50);
       await sleep(intervalMs);
 
+      // Clear
       alt1.overLayClearGroup(g);
       await sleep(intervalMs);
     }
   } finally {
     // Always leave the overlay group clean
+    alt1.overLaySetGroup(g);
     alt1.overLayClearGroup(g);
     flashing = false;
   }
@@ -231,7 +225,8 @@ function stop() {
 
   // Clean up flash overlay if it was mid-flight.
   if (window.alt1 && alt1.permissionOverlay) {
-    alt1.overLayClearGroup("progflash_flash");
+    alt1.overLaySetGroup("progflash");
+    alt1.overLayClearGroup("progflash");
   }
   flashing = false;
 }
