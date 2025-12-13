@@ -46,9 +46,10 @@ if (
 }
 
       }
-      if (match > 20) return { x, y, w: nc.width, h: nc.height };
+      if (match >= 10) return { x, y, w: nc.width, h: nc.height };
     }
   }
   return null;
 }
+
 
