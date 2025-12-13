@@ -1,13 +1,15 @@
 // matcher.js
-// Alt1-compatible (NO ES modules)
+// Alt1-compatible (NO ES modules). Exposes captureRs/loadImage/findAnchor on window.
 
 /* ================= CAPTURE ================= */
 
 function toImageData(cap) {
   if (!cap) return null;
 
-  if (cap.data && cap.width && cap.height) return cap;
+  // Some Alt1 builds return ImageData directly
+  if (cap.data && typeof cap.width === "number" && typeof cap.height === "number") return cap;
 
+  // Some return a capture-handle that needs conversion
   try {
     if (typeof cap.toData === "function") return cap.toData();
   } catch {}
@@ -23,20 +25,34 @@ function captureRs() {
   if (!window.alt1) return null;
   if (!alt1.permissionPixel) return null;
 
-  const x = alt1.rsX;
-  const y = alt1.rsY;
-  const w = alt1.rsWidth;
-  const h = alt1.rsHeight;
+  const x = Number.isFinite(alt1.rsX) ? alt1.rsX : 0;
+  const y = Number.isFinite(alt1.rsY) ? alt1.rsY : 0;
+  const w = Number.isFinite(alt1.rsWidth) ? alt1.rsWidth : 0;
+  const h = Number.isFinite(alt1.rsHeight) ? alt1.rsHeight : 0;
 
   if (!w || !h) return null;
 
-  try {
-    // NEW Alt1 API (your build)
-    const cap = alt1.captureMethod(x, y, w, h);
-    const img = toImageData(cap);
-    if (img) return img;
-  } catch (e) {
-    console.error("captureMethod failed", e);
+  // Try the common Alt1 capture APIs in a safe order.
+  const attempts = [
+    () => (typeof alt1.captureHoldFullRs === "function" ? alt1.captureHoldFullRs() : null),
+    () => (typeof alt1.captureHoldFull === "function" ? alt1.captureHoldFull() : null),
+
+    () => (typeof alt1.captureHold === "function" ? alt1.captureHold(x, y, w, h) : null),
+    () => (typeof alt1.captureHold === "function" ? alt1.captureHold(0, 0, w, h) : null),
+
+    () => (typeof alt1.capture === "function" ? alt1.capture(x, y, w, h) : null),
+    () => (typeof alt1.capture === "function" ? alt1.capture(0, 0, w, h) : null),
+
+    // Some builds expose captureMethod; if it accepts region args, try it last.
+    () => (typeof alt1.captureMethod === "function" && alt1.captureMethod.length >= 4 ? alt1.captureMethod(x, y, w, h) : null),
+  ];
+
+  for (let i = 0; i < attempts.length; i++) {
+    try {
+      const cap = attempts[i]();
+      const img = toImageData(cap);
+      if (img) return img;
+    } catch {}
   }
 
   return null;
@@ -82,7 +98,7 @@ function findAnchor(hay, needle, opts = {}) {
   const h = hay.data;
   const n = needle.data;
 
-  // Precompute needle luminance
+  // Precompute needle luminance (more robust than RGB)
   const nLum = new Uint8Array(nw * nh);
   for (let j = 0; j < nh; j++) {
     for (let i = 0; i < nw; i++) {
