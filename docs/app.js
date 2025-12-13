@@ -112,8 +112,15 @@ async function start() {
 
     const img = window.captureRs();
     if (!img) {
-      const capFns = window.alt1
-        ? Object.keys(alt1).filter(k => k.toLowerCase().includes("capture")).sort().join(",")
+
+      const alt1Fns = window.alt1
+        ? Object.keys(alt1).filter(k => k.toLowerCase().includes("capture") && typeof alt1[k] === "function").sort().join(",")
+        : "n/a";
+      const alt1Caps = window.alt1
+        ? Object.keys(alt1).filter(k => k.toLowerCase().includes("capture") && typeof alt1[k] !== "function").sort().join(",")
+        : "n/a";
+      const a1libFns = window.a1lib
+        ? Object.keys(a1lib).filter(k => k.toLowerCase().includes("capture") && typeof a1lib[k] === "function").sort().join(",")
         : "n/a";
 
       dbg(
@@ -121,7 +128,9 @@ async function start() {
         `anchor=${anchor.width}x${anchor.height}\n` +
         `rsX=${alt1.rsX} rsY=${alt1.rsY}\n` +
         `rsW=${alt1.rsWidth} rsH=${alt1.rsHeight}\n` +
-        `captureFns=${capFns}\n` +
+        `alt1.capture fn=${alt1Fns}\n` +
+        `alt1.capture props=${alt1Caps}\n` +
+        `a1lib.capture fn=${a1libFns}\n` +
         `captureRs(): null (capture failed)`
       );
       return;
@@ -175,12 +184,6 @@ function stop() {
   running = false;
   if (loop) clearInterval(loop);
   loop = null;
-
-  if (window.alt1 && alt1.captureInterval) {
-  try {
-    alt1.captureInterval(0, 0, 0, 0, 0); // stop capture
-  } catch {}
-}
 
   startBtn.disabled = false;
   stopBtn.disabled = true;

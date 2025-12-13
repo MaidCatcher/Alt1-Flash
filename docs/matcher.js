@@ -1,5 +1,8 @@
 // matcher.js (Alt1-compatible: NO ES modules)
 // Exposes: window.captureRs, window.loadImage, window.findAnchor
+//
+// IMPORTANT: Your Alt1 build does NOT provide callable alt1.capture()/alt1.captureHold()/alt1.captureMethod().
+// Use a1lib capture instead (this is what most Alt1 apps rely on).
 
 function toImageData(cap) {
   if (!cap) return null;
@@ -16,46 +19,41 @@ function toImageData(cap) {
   return null;
 }
 
-let captureStarted = false;
-
 function captureRs() {
-  if (!window.alt1) return null;
-  if (!alt1.permissionPixel) return null;
+  // Prefer a1lib (most consistent across Alt1 builds)
+  if (!window.a1lib) return null;
+  if (window.alt1 && !alt1.permissionPixel) return null;
 
+  // 1) Best option: full RuneScape capture
   try {
-    // Start capture once by setting interval (property, not function)
-    if (!captureStarted) {
-      alt1.captureInterval = 100; // ms
-      captureStarted = true;
-    }
-
-    const cap = alt1.captureMethod();
-    if (!cap) return null;
-
-    // ImageData directly
-    if (cap.data && cap.width && cap.height) {
-      return cap;
-    }
-
-    // Capture handle → ImageData
-    if (typeof cap.toData === "function") {
-      const img = cap.toData();
-      if (img && img.data) return img;
-    }
-
-    if (typeof cap.toImageData === "function") {
-      const img = cap.toImageData();
-      if (img && img.data) return img;
+    if (typeof a1lib.captureHoldFullRs === "function") {
+      const cap = a1lib.captureHoldFullRs();
+      const img = toImageData(cap);
+      if (img) return img;
     }
   } catch (e) {
-    console.error("capture failed", e);
+    console.error("a1lib.captureHoldFullRs failed", e);
+  }
+
+  // 2) Fallback: capture the RS viewport region (screen coords)
+  try {
+    if (typeof a1lib.captureHold === "function" && window.alt1) {
+      const x = alt1.rsX || 0;
+      const y = alt1.rsY || 0;
+      const w = alt1.rsWidth || 0;
+      const h = alt1.rsHeight || 0;
+      if (w && h) {
+        const cap = a1lib.captureHold(x, y, w, h);
+        const img = toImageData(cap);
+        if (img) return img;
+      }
+    }
+  } catch (e) {
+    console.error("a1lib.captureHold failed", e);
   }
 
   return null;
 }
-
-
-
 
 function loadImage(url) {
   return new Promise((resolve, reject) => {
