@@ -1,195 +1,114 @@
-// matcher.js — classic script, Alt1-compatible
+// matcher.js — classic script, Alt1-compatible (NO imports/exports)
+// Uses alt1.getRegion(...) which returns base64-encoded raw pixels.
 // Exposes globals:
 //   window.progflashCaptureRs
 //   window.progflashLoadImage
 //   window.progflashFindAnchor
-// Also exposes diagnostics:
-//   window.progflashCaptureDiag
 
 (function () {
+  // cache buffers to avoid realloc every tick
+  let lastW = 0, lastH = 0;
+  let rgba = null; // Uint8ClampedArray
+  let imgObj = null; // ImageData
+
+  // Debug info (optional, but useful)
   const diag = {
-    captureMode: "",
     lastErr: "",
-    cbCount: 0,
-    argSample: "",
-    hasFrame: false,
-    retSummary: ""
+    lastMode: "",
+    frames: 0,
+    lastB64Len: 0,
   };
 
-  let lastFrame = null;
-  let started = false;
-
-  function summarize(obj) {
-    try {
-      if (!obj) return String(obj);
-      const t = typeof obj;
-      if (t !== "object" && t !== "function") return `${t}:${String(obj)}`;
-      const keys = Object.keys(obj).slice(0, 20);
-      return `${t} keys=[${keys.join(",")}]`;
-    } catch {
-      return "unprintable";
-    }
+  function b64ToBytes(b64) {
+    // atob returns a binary string where charCodeAt is the byte value
+    const bin = atob(b64);
+    const len = bin.length;
+    const out = new Uint8ClampedArray(len);
+    for (let i = 0; i < len; i++) out[i] = bin.charCodeAt(i);
+    return out;
   }
 
-  function tryExtractFrameFromArgs(args) {
-    for (const a of args) {
-      if (!a) continue;
+  function ensureImageData(w, h) {
+    if (w === lastW && h === lastH && rgba && imgObj) return;
 
-      // ImageData-like
-      if (a.data && a.width && a.height) return a;
-
-      // Common wrappers
-      if (a.imageData && a.imageData.data && a.imageData.width) return a.imageData;
-      if (a.img && a.img.data && a.img.width) return a.img;
-      if (a.frame && a.frame.data && a.frame.width) return a.frame;
-
-      // Nested candidates
-      if (typeof a === "object") {
-        for (const k of ["data", "image", "capture", "payload", "detail"]) {
-          const v = a[k];
-          if (v && v.data && v.width && v.height) return v;
-        }
-      }
-
-      // Conversion helpers
-      if (typeof a.toImageData === "function") {
-        const img = a.toImageData();
-        if (img && img.data && img.width && img.height) return img;
-      }
-      if (typeof a.toData === "function") {
-        const img = a.toData();
-        if (img && img.data && img.width && img.height) return img;
-      }
-    }
-    return null;
+    lastW = w; lastH = h;
+    rgba = new Uint8ClampedArray(w * h * 4);
+    imgObj = new ImageData(rgba, w, h);
   }
 
-  // Enable capture on builds where captureEvents won't fire until these are set
-  function enableAlt1Capture() {
-    if (!window.alt1) return;
-    try {
-      // captureMethod is a STRING on your build (ex: "OpenGL")
-      if (typeof alt1.captureMethod === "string") {
-        alt1.captureMethod = alt1.captureMethod || "OpenGL";
-      } else {
-        alt1.captureMethod = "OpenGL";
-      }
-    } catch (e) {
-      diag.lastErr = `enable captureMethod failed: ${e && e.message ? e.message : String(e)}`;
+  // NOTE: the byte order from Alt1 getRegion is usually BGRA.
+  // We'll convert BGRA -> RGBA by swapping R and B each pixel.
+  function bgraToRgbaInPlace(buf) {
+    for (let i = 0; i < buf.length; i += 4) {
+      const b = buf[i + 0];
+      const g = buf[i + 1];
+      const r = buf[i + 2];
+      const a = buf[i + 3];
+      buf[i + 0] = r;
+      buf[i + 1] = g;
+      buf[i + 2] = b;
+      buf[i + 3] = a;
     }
-
-    try {
-      // captureInterval is a NUMBER on your build
-      if (typeof alt1.captureInterval === "number") {
-        alt1.captureInterval = Math.max(50, alt1.captureInterval || 100);
-      } else {
-        alt1.captureInterval = 100;
-      }
-    } catch (e) {
-      diag.lastErr = `enable captureInterval failed: ${e && e.message ? e.message : String(e)}`;
-    }
-  }
-
-  function ensureCaptureEventsStarted() {
-    if (started) return;
-    started = true;
-
-    enableAlt1Capture();
-
-    if (typeof window.captureEvents !== "function") {
-      diag.captureMode = "no captureEvents";
-      return;
-    }
-
-    const cb = function () {
-      try {
-        diag.cbCount++;
-        const args = Array.from(arguments);
-
-        if (!diag.argSample) {
-          diag.argSample = args.map(a => summarize(a)).join(" | ");
-        }
-
-        const frame = tryExtractFrameFromArgs(args);
-        if (frame) {
-          lastFrame = frame;
-          diag.hasFrame = true;
-        }
-      } catch (e) {
-        diag.lastErr = (e && e.message) ? e.message : String(e);
-      }
-    };
-
-    // Prime call (some builds require this)
-    let ret = null;
-    try {
-      ret = window.captureEvents();
-      diag.retSummary = summarize(ret);
-    } catch (e) {
-      // ignore, still try other patterns
-    }
-
-    // Attach to returned object if it has a subscription API
-    try {
-      if (ret && typeof ret.on === "function") {
-        ret.on("capture", cb);
-        diag.captureMode += (diag.captureMode ? " + " : "") + "ret.on('capture')";
-      }
-      if (ret && typeof ret.addEventListener === "function") {
-        ret.addEventListener("capture", cb);
-        diag.captureMode += (diag.captureMode ? " + " : "") + "ret.addEventListener('capture')";
-      }
-      if (ret && typeof ret.subscribe === "function") {
-        ret.subscribe(cb);
-        diag.captureMode += (diag.captureMode ? " + " : "") + "ret.subscribe(cb)";
-      }
-    } catch (e) {
-      diag.lastErr = (e && e.message) ? e.message : String(e);
-    }
-
-    // Try common call signatures (varargs native; may accept extra args)
-    const patterns = [
-      ["captureEvents(cb)", () => window.captureEvents(cb)],
-      ["captureEvents('capture',cb)", () => window.captureEvents("capture", cb)],
-      ["captureEvents('rs',cb)", () => window.captureEvents("rs", cb)],
-      ["captureEvents({type:'capture'},cb)", () => window.captureEvents({ type: "capture" }, cb)]
-    ];
-
-    for (const [name, fn] of patterns) {
-      try {
-        fn();
-        diag.captureMode += (diag.captureMode ? " + " : "") + name;
-      } catch (e) {
-        // swallow, keep trying
-        if (!diag.lastErr) diag.lastErr = (e && e.message) ? e.message : String(e);
-      }
-    }
-
-    // DOM event fallback (sometimes native dispatches events)
-    const evNames = ["capture", "Capture", "captureevent", "captureEvent", "frame", "rsCapture"];
-    for (const ev of evNames) {
-      try {
-        window.addEventListener(ev, (e) => cb(e, e && e.detail));
-        diag.captureMode += (diag.captureMode ? " + " : "") + `window.on('${ev}')`;
-      } catch {}
-    }
-
-    // Re-arm interval after hooks are attached (some builds need this)
-    enableAlt1Capture();
-
-    // If nothing arrives quickly, keep a helpful hint in lastErr
-    setTimeout(() => {
-      if (diag.cbCount === 0 && !diag.lastErr) {
-        diag.lastErr = "captureEvents subscribed but no callbacks. Check Alt1: Linked windows (RuneScape ticked) + View Screen enabled + correct capture mode.";
-      }
-    }, 1200);
   }
 
   function progflashCaptureRs() {
-    ensureCaptureEventsStarted();
-    return lastFrame;
+    diag.lastErr = "";
+    diag.lastMode = "";
+
+    if (!window.alt1 || !alt1.permissionPixel) {
+      diag.lastErr = "no alt1 / no permissionPixel";
+      return null;
+    }
+    if (typeof alt1.getRegion !== "function") {
+      diag.lastErr = "alt1.getRegion missing";
+      return null;
+    }
+
+    try {
+      const x = alt1.rsX || 0;
+      const y = alt1.rsY || 0;
+      const w = alt1.rsWidth || 0;
+      const h = alt1.rsHeight || 0;
+      if (!w || !h) {
+        diag.lastErr = `bad rs dims: ${w}x${h}`;
+        return null;
+      }
+
+      // getRegion returns base64 raw pixels (length ~ (w*h*4)*4/3)
+      const b64 = alt1.getRegion(x, y, w, h);
+      if (!b64 || typeof b64 !== "string") {
+        diag.lastErr = "getRegion returned non-string/empty";
+        return null;
+      }
+
+      diag.lastMode = "getRegion(base64)";
+      diag.lastB64Len = b64.length;
+
+      // decode -> bytes -> convert order -> copy to cached ImageData buffer
+      const bytes = b64ToBytes(b64);
+
+      // sanity: bytes length must match w*h*4
+      const expected = w * h * 4;
+      if (bytes.length !== expected) {
+        diag.lastErr = `decoded bytes len ${bytes.length} != expected ${expected}`;
+        return null;
+      }
+
+      // Convert BGRA -> RGBA
+      bgraToRgbaInPlace(bytes);
+
+      ensureImageData(w, h);
+      rgba.set(bytes);
+
+      diag.frames++;
+      return imgObj;
+    } catch (e) {
+      diag.lastErr = (e && e.message) ? e.message : String(e);
+      return null;
+    }
   }
 
+  // ---- Load anchor image ----
   function progflashLoadImage(url) {
     return new Promise((resolve, reject) => {
       const img = new Image();
@@ -207,7 +126,7 @@
     });
   }
 
-  // Luma-based match
+  // ---- Anchor matcher (luma-based) ----
   function progflashFindAnchor(hay, needle, opts = {}) {
     if (!hay || !needle) return null;
 
@@ -218,7 +137,7 @@
 
     const hw = hay.width, hh = hay.height;
     const nw = needle.width, nh = needle.height;
-    if (nw > hw || nh > hh) return returnBest ? { ok: false, score: 0, best: null } : null;
+    if (nw > hw || nh > hh) return returnBest ? { ok: false, score: 0 } : null;
 
     const h = hay.data;
     const n = needle.data;
@@ -227,7 +146,8 @@
     for (let j = 0; j < nh; j++) {
       for (let i = 0; i < nw; i++) {
         const idx = (j * nw + i) * 4;
-        nLum[j * nw + i] = (n[idx] * 30 + n[idx + 1] * 59 + n[idx + 2] * 11) / 100;
+        nLum[j * nw + i] =
+          (n[idx] * 30 + n[idx + 1] * 59 + n[idx + 2] * 11) / 100;
       }
     }
 
@@ -241,7 +161,8 @@
         for (let j = 0; j < nh; j++) {
           for (let i = 0; i < nw; i++) {
             const hi = ((y + j) * hw + (x + i)) * 4;
-            const lum = (h[hi] * 30 + h[hi + 1] * 59 + h[hi + 2] * 11) / 100;
+            const lum =
+              (h[hi] * 30 + h[hi + 1] * 59 + h[hi + 2] * 11) / 100;
             if (Math.abs(lum - nLum[j * nw + i]) <= tolerance) good++;
           }
         }
@@ -251,7 +172,9 @@
           best = { x, y, w: nw, h: nh };
         }
         if (score >= minScore) {
-          return returnBest ? { ok: true, x, y, w: nw, h: nh, score, best } : { x, y, w: nw, h: nh };
+          return returnBest
+            ? { ok: true, x, y, w: nw, h: nh, score, best }
+            : { x, y, w: nw, h: nh };
         }
       }
     }
@@ -259,8 +182,11 @@
     return returnBest ? { ok: false, score: bestScore, best } : null;
   }
 
+  // ---- Export globals (correct names) ----
   window.progflashCaptureRs = progflashCaptureRs;
   window.progflashLoadImage = progflashLoadImage;
   window.progflashFindAnchor = progflashFindAnchor;
+
+  // Optional diag export
   window.progflashCaptureDiag = diag;
 })();
