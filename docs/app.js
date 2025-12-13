@@ -66,6 +66,14 @@ let running = false;
 let loop = null;
 let anchor = null;
 
+function hasMatcherGlobals() {
+  return (
+    typeof window.progflashCaptureRs === "function" &&
+    typeof window.progflashLoadImage === "function" &&
+    typeof window.progflashFindAnchor === "function"
+  );
+}
+
 async function start() {
   if (!window.alt1) { alert("Open this inside Alt1."); return; }
 
@@ -81,19 +89,21 @@ async function start() {
     return;
   }
 
-  if (!window.loadImage || !window.captureRs || !window.findAnchor) {
+  // ✅ FIX: check the correct matcher globals
+  if (!hasMatcherGlobals()) {
     setStatus("matcher.js not loaded");
     dbg(
       `ProgFlash v=${APP_V}\n` +
       `Missing matcher globals.\n` +
-      `Make sure matcher.js loads BEFORE app.js in index.html.`
+      `Expected: progflashCaptureRs/progflashLoadImage/progflashFindAnchor\n` +
+      `Got: capture=${typeof window.progflashCaptureRs}, load=${typeof window.progflashLoadImage}, find=${typeof window.progflashFindAnchor}`
     );
     return;
   }
 
   if (!anchor) {
     setStatus("Loading anchor…");
-    anchor = await window.loadImage("./img/progbar_anchor.png?v=" + APP_V);
+    anchor = await window.progflashLoadImage("./img/progbar_anchor.png?v=" + APP_V);
   }
 
   running = true;
@@ -107,27 +117,33 @@ async function start() {
 
   if (loop) clearInterval(loop);
 
-  loop = setInterval(() => {
+  // (Optional but helpful): tick immediately
+  // so you don’t miss the bar right after clicking Start.
+  const tick = () => {
     if (!running) return;
 
-    const img = window.captureRs();
+    const img = window.progflashCaptureRs();
+
     if (!img) {
-      const capFns = window.alt1
+      const capKeys = window.alt1
         ? Object.keys(alt1).filter(k => k.toLowerCase().includes("capture")).sort().join(",")
         : "n/a";
+
+      const nativeCE = typeof window.captureEvents;
 
       dbg(
         `ProgFlash v=${APP_V}\n` +
         `anchor=${anchor.width}x${anchor.height}\n` +
         `rsX=${alt1.rsX} rsY=${alt1.rsY}\n` +
         `rsW=${alt1.rsWidth} rsH=${alt1.rsHeight}\n` +
-        `captureFns=${capFns}\n` +
+        `native captureEvents: ${nativeCE}\n` +
+        `alt1 capture keys: ${capKeys}\n` +
         `captureRs(): null (capture failed)`
       );
       return;
     }
 
-    const res = window.findAnchor(img, anchor, {
+    const res = window.progflashFindAnchor(img, anchor, {
       tolerance: 65,
       stride: 1,
       minScore: 0.50,
@@ -168,7 +184,10 @@ async function start() {
       setStatus("Searching…");
       setLock("none");
     }
-  }, 200);
+  };
+
+  tick();
+  loop = setInterval(tick, 200);
 }
 
 function stop() {
@@ -176,11 +195,7 @@ function stop() {
   if (loop) clearInterval(loop);
   loop = null;
 
-  if (window.alt1 && alt1.captureInterval) {
-  try {
-    alt1.captureInterval(0, 0, 0, 0, 0); // stop capture
-  } catch {}
-}
+  // ✅ FIX: remove alt1.captureInterval(...) call (it is not a function on your build)
 
   startBtn.disabled = false;
   stopBtn.disabled = true;
@@ -211,11 +226,9 @@ setStatus("Idle");
 setMode("Not running");
 setLock("none");
 
-// If matcher loads after app.js, update status when it's available.
+// ✅ FIX: if matcher loads after app.js, clear the stale error
 (function waitForMatcher() {
-  if (typeof window.progflashCaptureRs === "function" &&
-      typeof window.progflashLoadImage === "function" &&
-      typeof window.progflashFindAnchor === "function") {
+  if (hasMatcherGlobals()) {
     if (statusEl && statusEl.textContent.includes("matcher.js")) {
       setStatus("Idle");
     }
@@ -224,13 +237,13 @@ setLock("none");
   setTimeout(waitForMatcher, 50);
 })();
 
-
 if (window.alt1) {
   dbg(
     `ProgFlash v=${APP_V}\n` +
     `alt1: true\n` +
     `overlay: ${alt1.permissionOverlay}\n` +
-    `capture: ${alt1.permissionPixel}`
+    `capture: ${alt1.permissionPixel}\n` +
+    `matcher globals: ${hasMatcherGlobals() ? "yes" : "no"}`
   );
 } else {
   dbg(`ProgFlash v=${APP_V}\nalt1: false`);
