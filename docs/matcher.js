@@ -33,14 +33,29 @@ export function loadImage(url) {
  *  - step: scan step in the haystack (default 2)               [higher = faster, less accurate]
  *  - minScore: fraction [0..1] required to accept a match (default 0.65)
  */
+/**
+ * Find a small template image (needleImg) inside an ImageData (haystack).
+ *
+ * Robustness improvements:
+ *  - Compares on luminance (grayscale) instead of raw RGB so it survives small UI/theme/color changes.
+ *  - Can optionally return the best-scoring location even if below minScore (opts.returnBest=true).
+ *
+ * opts:
+ *  - tolerance: luminance tolerance (default 28)
+ *  - stride: sample every Nth pixel in the needle (default 2)  [higher = faster, less accurate]
+ *  - step: scan step in the haystack (default 2)               [higher = faster, less accurate]
+ *  - minScore: fraction [0..1] required to accept a match (default 0.62)
+ *  - returnBest: if true, returns best match with {passed:false} even if score < minScore
+ */
 export function findAnchor(haystack, needleImg, opts = {}) {
   const cw = haystack.width;
   const ch = haystack.height;
 
-  const tolerance = typeof opts.tolerance === "number" ? opts.tolerance : 18;
+  const tolerance = typeof opts.tolerance === "number" ? opts.tolerance : 28;
   const stride = typeof opts.stride === "number" ? Math.max(1, opts.stride) : 2;
   const step = typeof opts.step === "number" ? Math.max(1, opts.step) : 2;
-  const minScore = typeof opts.minScore === "number" ? opts.minScore : 0.65;
+  const minScore = typeof opts.minScore === "number" ? opts.minScore : 0.62;
+  const returnBest = !!opts.returnBest;
 
   // Render needleImg into ImageData
   const nc = document.createElement("canvas");
@@ -48,12 +63,12 @@ export function findAnchor(haystack, needleImg, opts = {}) {
   nc.height = needleImg.height;
   const nctx = nc.getContext("2d", { willReadFrequently: true });
   nctx.drawImage(needleImg, 0, 0);
-  const needle = nctx.getImageData(0, 0, nc.width, nc.height).data;
 
+  const needleData = nctx.getImageData(0, 0, nc.width, nc.height).data;
   const nw = nc.width;
   const nh = nc.height;
 
-  // How many needle pixels will we actually sample?
+  // Precompute needle luminance for sampled pixels
   const sampleXs = [];
   for (let x = 0; x < nw; x += stride) sampleXs.push(x);
   const sampleYs = [];
@@ -62,37 +77,59 @@ export function findAnchor(haystack, needleImg, opts = {}) {
   const totalSamples = sampleXs.length * sampleYs.length;
   if (totalSamples <= 0) return null;
 
+  // Needle luminance lookup for sampled pixels (flat array aligned with sampling loops)
+  const needleLum = new Uint8Array(totalSamples);
+  let k = 0;
+  for (let sy = 0; sy < sampleYs.length; sy++) {
+    const y = sampleYs[sy];
+    const rowBase = (y * nw) * 4;
+    for (let sx = 0; sx < sampleXs.length; sx++) {
+      const x = sampleXs[sx];
+      const i = rowBase + x * 4;
+      const r = needleData[i], g = needleData[i + 1], b = needleData[i + 2];
+      // ITU-R BT.601 luma approximation
+      needleLum[k++] = (r * 299 + g * 587 + b * 114) / 1000;
+    }
+  }
+
+  let best = null; // {x,y,w,h,score,passed}
+  let bestScore = -1;
+
   for (let y = 0; y <= ch - nh; y += step) {
     for (let x = 0; x <= cw - nw; x += step) {
       let matched = 0;
+      let idx = 0;
 
-      // Sample needle pixels and compare with haystack at offset (x,y)
       for (let sy = 0; sy < sampleYs.length; sy++) {
         const ny = sampleYs[sy];
         const hayRowBase = ((y + ny) * cw + x) * 4;
-        const needleRowBase = (ny * nw) * 4;
 
         for (let sx = 0; sx < sampleXs.length; sx++) {
           const nx = sampleXs[sx];
           const hi = hayRowBase + nx * 4;
-          const ni = needleRowBase + nx * 4;
 
-          const dr = Math.abs(haystack.data[hi]     - needle[ni]);
-          const dg = Math.abs(haystack.data[hi + 1] - needle[ni + 1]);
-          const db = Math.abs(haystack.data[hi + 2] - needle[ni + 2]);
+          const r = haystack.data[hi];
+          const g = haystack.data[hi + 1];
+          const b = haystack.data[hi + 2];
 
-          if (dr <= tolerance && dg <= tolerance && db <= tolerance) {
-            matched++;
-          }
+          const lum = (r * 299 + g * 587 + b * 114) / 1000;
+          const dl = Math.abs(lum - needleLum[idx++]);
+
+          if (dl <= tolerance) matched++;
         }
       }
 
       const score = matched / totalSamples;
+      if (score > bestScore) {
+        bestScore = score;
+        best = { x, y, w: nw, h: nh, score, passed: score >= minScore };
+      }
+
       if (score >= minScore) {
-        return { x, y, w: nw, h: nh, score };
+        return { x, y, w: nw, h: nh, score, passed: true };
       }
     }
   }
 
-  return null;
+  return returnBest ? best : null;
 }
