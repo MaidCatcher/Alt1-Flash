@@ -176,6 +176,12 @@ function stop() {
   if (loop) clearInterval(loop);
   loop = null;
 
+  if (window.alt1 && alt1.captureInterval) {
+  try {
+    alt1.captureInterval(0, 0, 0, 0, 0); // stop capture
+  } catch {}
+}
+
   startBtn.disabled = false;
   stopBtn.disabled = true;
 
