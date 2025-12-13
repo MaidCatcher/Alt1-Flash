@@ -93,14 +93,30 @@ async function start() {
 dbg(`tries=${tries} hits=${hits}\nlast lock=${hit ? hit.x + "," + hit.y : "none"}`);
 
 
-    const hit = findAnchor(img, anchor, { tolerance: 40, stride: 2, minScore: 0.60 });
+   const hit = findAnchor(img, anchor, { tolerance: 50, stride: 1, minScore: 0.50 });
 
-    if (hit) {
-      lastSeen = Date.now();
-      setStatus("Locked");
-      setLock(`x=${hit.x}, y=${hit.y}`);
-      return;
-    }
+if (hit) {
+  lastSeen = Date.now();
+  setStatus("Locked");
+  setLock(`x=${hit.x}, y=${hit.y}`);
+
+  // BLUE DEBUG BOX (draw exactly where we matched)
+  if (alt1.permissionOverlay) {
+    alt1.overLaySetGroup("progflash_debug");
+    alt1.overLayRect(
+      rgba(0, 120, 255, 200),
+      (alt1.rsX || 0) + hit.x,
+      (alt1.rsY || 0) + hit.y,
+      hit.w,
+      hit.h,
+      300,
+      2
+    );
+  }
+
+  return;
+}
+
 
     if (lastSeen && Date.now() - lastSeen > 450) {
       flashOverlay();
