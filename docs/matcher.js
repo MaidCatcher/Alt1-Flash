@@ -16,23 +16,49 @@ function toImageData(cap) {
   return null;
 }
 
+let captureStarted = false;
+
 function captureRs() {
   if (!window.alt1) return null;
   if (!alt1.permissionPixel) return null;
 
-  // Your Alt1 build exposes captureMethod (not capture/captureHold).
+  const x = alt1.rsX;
+  const y = alt1.rsY;
+  const w = alt1.rsWidth;
+  const h = alt1.rsHeight;
+
+  if (!w || !h) return null;
+
   try {
-    if (typeof alt1.captureMethod === "function") {
-      // Many builds return a capture object for RS without args.
-      const cap = alt1.captureMethod();
-      const img = toImageData(cap);
-      if (img) return img;
+    // IMPORTANT: start capture once
+    if (!captureStarted) {
+      alt1.captureInterval(x, y, w, h, 100);
+      captureStarted = true;
+    }
+
+    // Read latest captured frame
+    const cap = alt1.captureMethod();
+    if (!cap) return null;
+
+    // Convert capture handle → ImageData
+    if (cap.data && cap.width && cap.height) return cap;
+
+    if (typeof cap.toData === "function") {
+      const img = cap.toData();
+      if (img && img.data) return img;
+    }
+
+    if (typeof cap.toImageData === "function") {
+      const img = cap.toImageData();
+      if (img && img.data) return img;
     }
   } catch (e) {
-    console.error("captureMethod() failed", e);
+    console.error("capture failed", e);
   }
 
   return null;
+}
+
 }
 
 function loadImage(url) {
