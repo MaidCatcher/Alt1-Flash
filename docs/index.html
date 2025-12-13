@@ -1,36 +1,21 @@
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8">
+  <meta charset="utf-8" />
   <title>ProgFlash</title>
   <style>
-    body {
-      font-family: sans-serif;
-      margin: 12px;
-    }
-    button {
-      padding: 8px 10px;
-      margin-right: 8px;
-    }
-    .row {
-      margin: 10px 0;
-    }
-    .status {
-      background: #f2f2f2;
-      padding: 8px;
-      border-radius: 6px;
-    }
-    pre {
-      background: #000;
-      color: #00ff00;
-      padding: 8px;
-      border-radius: 6px;
-      white-space: pre-wrap;
-    }
+    body { font-family: sans-serif; margin: 12px; }
+    button { padding: 8px 10px; margin-right: 8px; }
+    .row { margin: 10px 0; }
+    .status { padding: 8px; background:#f2f2f2; border-radius: 6px; }
+    code { background:#eee; padding:2px 4px; border-radius: 4px; }
   </style>
+
+  <!-- Alt1 libs (RuneApps) -->
+  <script src="https://runeapps.org/alt1/alt1lib.js"></script>
+  <script src="https://runeapps.org/alt1/a1lib.js"></script>
 </head>
 <body>
-
   <h3>ProgFlash</h3>
 
   <div class="row">
@@ -45,8 +30,49 @@
     <div><b>Lock:</b> <span id="lock">none</span></div>
   </div>
 
-  <pre id="debugBox">Loading…</pre>
+  <div class="row">
+    <small>
+      Put <code>img/progbar_anchor.png</code> as a small crop of the progress bar’s left edge/cap (UI scale 100%).
+      Start cutting gems so the bar is visible, then hit <b>Start</b>.
+    </small>
+  </div>
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    const el = document.createElement("div");
+    el.textContent = "✅ inline JS running";
+    el.style.padding = "6px";
+    el.style.background = "#dfd";
+    el.style.border = "1px solid #9c9";
+    el.style.margin = "8px 0";
+    document.body.prepend(el);
+  });
+</script>
+  <script>
+  window.onerror = function(msg, src, line, col, err){
+    const pre = document.createElement("pre");
+    pre.style.whiteSpace = "pre-wrap";
+    pre.style.background = "#fee";
+    pre.style.border = "1px solid #f99";
+    pre.style.padding = "8px";
+    pre.textContent = `JS ERROR: ${msg}\n${src}:${line}:${col}`;
+    document.body.prepend(pre);
+  };
+</script>
 
-  <script type="module" src="./app.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@alt1/base@1.0.0-alpha.7/dist/index.bundle.js"></script>
+
+  <script src="./app.js"></script>
+  <script>
+  window.onerror = function(msg, src, line, col, err){
+    document.body.insertAdjacentHTML("beforeend",
+      "<pre style='white-space:pre-wrap;background:#fee;padding:8px;border:1px solid #f99;'>JS ERROR: "
+      + msg + "\n" + src + ":" + line + ":" + col + "</pre>");
+  };
+</script>
+
 </body>
 </html>
+
+
+
+
