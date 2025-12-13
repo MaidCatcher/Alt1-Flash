@@ -37,15 +37,29 @@
   <pre id="debugBox">Loading…</pre>
 
   <script>
-    window.onerror = function(msg, src, line, col){
+    window.addEventListener("error", (e) => {
       const pre = document.createElement("pre");
       pre.className = "err";
-      pre.textContent = `JS ERROR: ${msg}
-${src}:${line}:${col}`;
+      pre.textContent =
+        "JS ERROR: " + (e.message || String(e.error || e)) + "\n" +
+        (e.filename ? `${e.filename}:${e.lineno}:${e.colno}\n` : "") +
+        (e.error && e.error.stack ? e.error.stack : "");
       document.body.prepend(pre);
-    };
+    });
+
+    window.addEventListener("unhandledrejection", (e) => {
+      const pre = document.createElement("pre");
+      pre.className = "err";
+      const err = e.reason;
+      pre.textContent =
+        "PROMISE REJECTION: " + (err && err.message ? err.message : String(err)) + "\n" +
+        (err && err.stack ? err.stack : "");
+      document.body.prepend(pre);
+    });
   </script>
 
-  <script type="module" src="./app.js?v=1765636596943"></script>
+  <!-- IMPORTANT: matcher FIRST, then app -->
+  <script src="./matcher.js?v=999"></script>
+  <script src="./app.js?v=999"></script>
 </body>
 </html>
