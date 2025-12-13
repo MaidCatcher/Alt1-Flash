@@ -24,21 +24,39 @@ function clearDebug() {
   alt1.overLayClearGroup("progflash_debug");
 }
 
-function flashOverlay() {
+// --- Flash control (prevents overlapping timers / “spamming” Windows focus/notifications) ---
+let flashing = false;
+let lastFlashAt = 0;
+const FLASH_COOLDOWN_MS = 1500;
+
+function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+async function flashOverlay({ cycles = 8, intervalMs = 220 } = {}) {
   if (!window.alt1) { alert("Open this inside Alt1."); return; }
+
   if (!alt1.permissionOverlay) {
     setStatus("No overlay permission");
     return;
   }
 
-  const g = "progflash";
-  let i = 0;
+  // Hard cooldown so we never retrigger rapidly (helps a LOT with the DND flicker symptom)
+  const now = Date.now();
+  if (now - lastFlashAt < FLASH_COOLDOWN_MS) return;
+  lastFlashAt = now;
 
-  const t = setInterval(() => {
+  // If a flash is already running, don’t start another one.
+  if (flashing) return;
+  flashing = true;
+
+  const g = "progflash";
+
+  try {
     alt1.overLaySetGroup(g);
-    if (i % 2 === 0) {
+
+    for (let i = 0; i < cycles; i++) {
+      // draw
       alt1.overLayRect(
-        rgba(255,0,0,160),
+        rgba(255, 0, 0, 160),
         alt1.rsX || 0,
         alt1.rsY || 0,
         alt1.rsWidth || 800,
@@ -46,14 +64,18 @@ function flashOverlay() {
         200,
         0
       );
-    } else {
+      await sleep(intervalMs);
+
+      // clear
       alt1.overLayClearGroup(g);
+      await sleep(intervalMs);
     }
-    if (++i >= 10) {
-      alt1.overLayClearGroup(g);
-      clearInterval(t);
-    }
-  }, 200);
+  } finally {
+    // Always leave the overlay group clean
+    alt1.overLaySetGroup(g);
+    alt1.overLayClearGroup(g);
+    flashing = false;
+  }
 }
 
 /**
@@ -134,15 +156,29 @@ async function start() {
   hits = 0;
   lastSeen = 0;
 
+  // If an old loop exists (shouldn't, but safe), kill it.
+  if (loop) {
+    clearInterval(loop);
+    loop = null;
+  }
+
   loop = setInterval(() => {
     if (!running) return;
+
+    // If permissions got toggled off while running, stop cleanly.
+    if (!alt1.permissionPixel || !alt1.permissionOverlay) {
+      stop();
+      setStatus("Permissions removed");
+      return;
+    }
 
     const img = captureRsViewport();
     if (!img) return;
 
     tries++;
 
-    const hit = findAnchor(img, anchor, { tolerance: 50, stride: 1, minScore: 0.50 });
+    // matcher.js now supports options; these are sane defaults for speed/robustness.
+    const hit = findAnchor(img, anchor, { tolerance: 50, stride: 2, minScore: 0.65 });
 
     if (hit) {
       hits++;
@@ -170,9 +206,11 @@ async function start() {
 
     dbg(`Anchor loaded\nw=${anchor.width} h=${anchor.height}\ntries=${tries} hits=${hits}\nlast lock=none`);
 
+    // Trigger a flash if we *recently* had a lock and then lost it for a bit.
+    // NOTE: cooldown inside flashOverlay prevents repeated flashing storms.
     if (lastSeen && Date.now() - lastSeen > 450) {
       clearDebug();
-      flashOverlay();
+      flashOverlay().catch(console.error);
       lastSeen = 0;
       setStatus("Flashed!");
       setLock("none");
@@ -182,7 +220,7 @@ async function start() {
 
 function stop() {
   running = false;
-  clearInterval(loop);
+  if (loop) clearInterval(loop);
   loop = null;
 
   startBtn.disabled = false;
@@ -192,15 +230,30 @@ function stop() {
   setStatus("Idle");
   setLock("none");
   clearDebug();
+
+  // Clean up flash overlay if it was mid-flight.
+  if (window.alt1 && alt1.permissionOverlay) {
+    alt1.overLaySetGroup("progflash");
+    alt1.overLayClearGroup("progflash");
+  }
+  flashing = false;
 }
 
 testBtn.onclick = () => {
+  console.log("TEST BUTTON CLICKED", Date.now());
   setStatus("Test flash");
-  flashOverlay();
+  flashOverlay().catch(console.error);
 };
 
-startBtn.onclick = () => { start().catch(e => { console.error(e); setStatus("Error (see console)"); }); };
-stopBtn.onclick = stop;
+startBtn.onclick = () => {
+  console.log("START CLICKED", Date.now());
+  start().catch(e => { console.error(e); setStatus("Error (see console)"); });
+};
+
+stopBtn.onclick = () => {
+  console.log("STOP CLICKED", Date.now());
+  stop();
+};
 
 // Startup state
 setStatus("Idle");
