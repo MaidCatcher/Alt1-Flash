@@ -59,7 +59,7 @@ function captureRs() {
   return null;
 }
 
-}
+
 
 function loadImage(url) {
   return new Promise((resolve, reject) => {
