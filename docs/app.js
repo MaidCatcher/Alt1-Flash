@@ -24,50 +24,36 @@ function clearDebug() {
   alt1.overLayClearGroup("progflash_debug");
 }
 
-// --- Flash control (prevents overlapping timers / “spamming” Windows focus/notifications) ---
-let flashing = false;
-let lastFlashAt = 0;
-const FLASH_COOLDOWN_MS = 1500;
-
-function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
-
-async function flashOverlay({ cycles = 6, intervalMs = 250 } = {}) {
+function flashOverlay() {
   if (!window.alt1) { alert("Open this inside Alt1."); return; }
-
   if (!alt1.permissionOverlay) {
     setStatus("No overlay permission");
     return;
   }
 
-  // Hard cooldown so we never retrigger rapidly (helps a LOT with the DND flicker symptom)
-  const now = Date.now();
-  if (now - lastFlashAt < FLASH_COOLDOWN_MS) return;
-  lastFlashAt = now;
+  const g = "progflash";
+  let i = 0;
 
-  // If a flash is already running, don’t start another one.
-  if (flashing) return;
-  flashing = true;
-
-  const g = "progflash_flash";
-  const colorBlue = -16776961; // 0xFF0000FF as signed int
-
-  try {
-    for (let i = 0; i < cycles; i++) {
-      // Draw
-      alt1.overLaySetGroup(g);
-      alt1.overLayText("PROGFLASH", colorBlue, 22, 30, 53, intervalMs * 2 + 50);
-      await sleep(intervalMs);
-
-      // Clear
-      alt1.overLayClearGroup(g);
-      await sleep(intervalMs);
-    }
-  } finally {
-    // Always leave the overlay group clean
+  const t = setInterval(() => {
     alt1.overLaySetGroup(g);
-    alt1.overLayClearGroup(g);
-    flashing = false;
-  }
+    if (i % 2 === 0) {
+      alt1.overLayRect(
+        rgba(255,0,0,160),
+        alt1.rsX || 0,
+        alt1.rsY || 0,
+        alt1.rsWidth || 800,
+        alt1.rsHeight || 600,
+        200,
+        0
+      );
+    } else {
+      alt1.overLayClearGroup(g);
+    }
+    if (++i >= 10) {
+      alt1.overLayClearGroup(g);
+      clearInterval(t);
+    }
+  }, 200);
 }
 
 /**
@@ -148,31 +134,21 @@ async function start() {
   hits = 0;
   lastSeen = 0;
 
-  // If an old loop exists (shouldn't, but safe), kill it.
-  if (loop) {
-    clearInterval(loop);
-    loop = null;
-  }
-
   loop = setInterval(() => {
     if (!running) return;
-
-    // If permissions got toggled off while running, stop cleanly.
-    if (!alt1.permissionPixel || !alt1.permissionOverlay) {
-      stop();
-      setStatus("Permissions removed");
-      return;
-    }
 
     const img = captureRsViewport();
     if (!img) return;
 
     tries++;
 
-    // matcher.js now supports options; these are sane defaults for speed/robustness.
-    const hit = findAnchor(img, anchor, { tolerance: 65, stride: 1, minScore: 0.50, returnBest: true });
+    const hit = findAnchor(img, anchor, { tolerance: 65, stride: 1, sampleStride: 1, minScore: 0.50, returnBest: true });
 
-    if (hit && hit.passed) {
+    // Always show best-match score to help tune the anchor/matcher
+    const bestScore = hit ? (hit.score ?? 0) : 0;
+
+
+    if (hit && hit.ok) {
       hits++;
       lastSeen = Date.now();
       setStatus("Locked");
@@ -192,35 +168,31 @@ async function start() {
         );
       }
 
-      dbg(`Anchor loaded\nw=${anchor.width} h=${anchor.height}\ntries=${tries} hits=${hits}\nlast lock=${hit.x},${hit.y}`);
+      dbg(`Anchor loaded\nw=${anchor.width} h=${anchor.height}\ntries=${tries} hits=${hits}\nlast lock=${hit.x},${hit.y}\nscore=${bestScore.toFixed(3)}`);
       return;
     }
 
-    dbg(`Anchor loaded
-w=${anchor.width} h=${anchor.height}
-tries=${tries} hits=${hits}
-last lock=none
-best score=${hit ? hit.score.toFixed(3) : "n/a"}`);
+    dbg(`Anchor loaded\nw=${anchor.width} h=${anchor.height}\ntries=${tries} hits=${hits}\nlast lock=none\nbest score=${bestScore.toFixed(3)}`);
 
-    // If we have a "best guess" location, draw it faintly to help you crop a better anchor.
-    if (hit && alt1.permissionOverlay && hit.score >= 0.45) {
+    // If we have a best candidate but it didn't pass minScore, draw a faint yellow box
+    // to show where the matcher thinks the closest match is.
+    if (hit && !hit.ok && alt1.permissionOverlay && bestScore >= 0.40) {
       alt1.overLaySetGroup("progflash_debug");
       alt1.overLayRect(
-        rgba(255, 255, 0, 120),
+        rgba(255, 220, 0, 120),
         (alt1.rsX || 0) + hit.x,
         (alt1.rsY || 0) + hit.y,
         hit.w,
         hit.h,
-        180,
+        250,
         2
       );
     }
 
-    // Trigger a flash if we *recently* had a lock and then lost it for a bit.
-    // NOTE: cooldown inside flashOverlay prevents repeated flashing storms.
+
     if (lastSeen && Date.now() - lastSeen > 450) {
       clearDebug();
-      flashOverlay().catch(console.error);
+      flashOverlay();
       lastSeen = 0;
       setStatus("Flashed!");
       setLock("none");
@@ -230,7 +202,7 @@ best score=${hit ? hit.score.toFixed(3) : "n/a"}`);
 
 function stop() {
   running = false;
-  if (loop) clearInterval(loop);
+  clearInterval(loop);
   loop = null;
 
   startBtn.disabled = false;
@@ -240,30 +212,15 @@ function stop() {
   setStatus("Idle");
   setLock("none");
   clearDebug();
-
-  // Clean up flash overlay if it was mid-flight.
-  if (window.alt1 && alt1.permissionOverlay) {
-    alt1.overLaySetGroup("progflash");
-    alt1.overLayClearGroup("progflash");
-  }
-  flashing = false;
 }
 
 testBtn.onclick = () => {
-  console.log("TEST BUTTON CLICKED", Date.now());
   setStatus("Test flash");
-  flashOverlay().catch(console.error);
+  flashOverlay();
 };
 
-startBtn.onclick = () => {
-  console.log("START CLICKED", Date.now());
-  start().catch(e => { console.error(e); setStatus("Error (see console)"); });
-};
-
-stopBtn.onclick = () => {
-  console.log("STOP CLICKED", Date.now());
-  stop();
-};
+startBtn.onclick = () => { start().catch(e => { console.error(e); setStatus("Error (see console)"); }); };
+stopBtn.onclick = stop;
 
 // Startup state
 setStatus("Idle");
