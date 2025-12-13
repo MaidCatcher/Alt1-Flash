@@ -170,7 +170,7 @@ async function start() {
     tries++;
 
     // matcher.js now supports options; these are sane defaults for speed/robustness.
-    const hit = findAnchor(img, anchor, { tolerance: 28, stride: 2, step: 2, minScore: 0.58, returnBest: true });
+    const hit = findAnchor(img, anchor, { tolerance: 65, stride: 1, minScore: 0.50, returnBest: true });
 
     if (hit && hit.passed) {
       hits++;
