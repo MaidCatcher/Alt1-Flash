@@ -1,155 +1,148 @@
-// matcher.js — browser-only, Alt1-safe
-//
+// matcher.js
 // Provides:
-//  - captureRs(): capture an ImageData from Alt1 (robust across Alt1 versions)
-//  - loadImage(url): load an image asset (cache-busted)
-//  - findAnchor(haystack, needleImg, opts): template match with optional best-score debug
+// - captureRs(): ImageData | null
+// - loadImage(url): Promise<ImageData>
+// - findAnchor(haystackImg, needleImg, opts)
+
+function toImageData(maybe) {
+  if (!maybe) return null;
+
+  // Already ImageData-like
+  if (maybe.data && typeof maybe.width === "number" && typeof maybe.height === "number") {
+    return maybe;
+  }
+
+  // Some Alt1 captures return a "ref" with toData() / toDataArray() / etc.
+  // Try common conversions safely.
+  try {
+    if (typeof maybe.toData === "function") return maybe.toData();
+  } catch {}
+  try {
+    if (typeof maybe.toImageData === "function") return maybe.toImageData();
+  } catch {}
+
+  return null;
+}
 
 export function captureRs() {
   if (!window.alt1) return null;
+  if (!alt1.permissionPixel) return null;
 
-  // Some Alt1 builds expose different capture functions. We try the common ones safely.
-  const fns = [
-    "captureHoldFullRs",
-    "captureHoldRs",
-    "captureHold",
-    "captureFullRs",
-    "captureRs",
-    "capture"
-  ];
+  // Some APIs expect viewport coords, others capture full RS.
+  const x = alt1.rsX || 0;
+  const y = alt1.rsY || 0;
+  const w = alt1.rsWidth || 0;
+  const h = alt1.rsHeight || 0;
 
-  for (const name of fns) {
+  const attempts = [];
+
+  // Full RS capture variants (different Alt1 versions expose different names)
+  if (typeof alt1.captureHoldFullRs === "function") attempts.push(() => alt1.captureHoldFullRs());
+  if (typeof alt1.captureHoldFull === "function")   attempts.push(() => alt1.captureHoldFull());
+  if (typeof alt1.captureFullRs === "function")     attempts.push(() => alt1.captureFullRs());
+  if (typeof alt1.captureFull === "function")       attempts.push(() => alt1.captureFull());
+
+  // Region capture variants
+  if (typeof alt1.captureHold === "function" && w && h) attempts.push(() => alt1.captureHold(x, y, w, h));
+  if (typeof alt1.capture === "function" && w && h)     attempts.push(() => alt1.capture(x, y, w, h));
+
+  // As a last resort, try captureHold() with no args (some builds default to RS)
+  if (typeof alt1.captureHold === "function") attempts.push(() => alt1.captureHold());
+
+  for (const fn of attempts) {
     try {
-      const fn = alt1 && alt1[name];
-      if (typeof fn === "function") {
-        const img = fn.call(alt1);
-        if (img && typeof img.width === "number" && typeof img.height === "number" && img.data) return img;
-      }
-    } catch (e) {
-      // ignore and try the next function
+      const out = fn();
+      const img = toImageData(out);
+      if (img && img.width && img.height) return img;
+    } catch {
+      // keep trying
     }
   }
 
   return null;
 }
 
-export function loadImage(url) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error("Failed to load image: " + url));
-    img.src = url + "?v=" + 1765636596943; // stable cache-bust per build
+export async function loadImage(url) {
+  const img = new Image();
+  img.crossOrigin = "anonymous";
+  img.src = url;
+
+  await new Promise((resolve, reject) => {
+    img.onload = resolve;
+    img.onerror = reject;
   });
+
+  const c = document.createElement("canvas");
+  c.width = img.naturalWidth;
+  c.height = img.naturalHeight;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0);
+  return ctx.getImageData(0, 0, c.width, c.height);
 }
 
-/**
- * findAnchor(haystack, needleImg, opts)
- *
- * opts:
- *  - tolerance: per-channel abs tolerance (default 18)
- *  - stride: sample every N pixels in needle (default 1)
- *  - step: scan step in haystack (default 1)
- *  - minScore: accept match if score >= minScore (default 0.50)
- *  - returnBest: if true, return best match even if not passed
- *
- * returns:
- *  - null (if inputs invalid)
- *  - if returnBest false: { x,y,w,h,score,passed:true } or null
- *  - if returnBest true: { x,y,w,h,score,passed } with best location always included
- */
-export function findAnchor(haystack, needleImg, opts = {}) {
-  if (!haystack || !haystack.data || !needleImg) return null;
-
-  const cw = haystack.width;
-  const ch = haystack.height;
-
-  const tolerance = typeof opts.tolerance === "number" ? opts.tolerance : 18;
-  const stride = typeof opts.stride === "number" ? Math.max(1, opts.stride) : 1;
-  const step = typeof opts.step === "number" ? Math.max(1, opts.step) : 1;
-  const minScore = typeof opts.minScore === "number" ? opts.minScore : 0.50;
+// Simple template match with tolerance/stride/minScore and optional returnBest
+export function findAnchor(hay, needle, opts = {}) {
+  const tolerance = opts.tolerance ?? 65;
+  const stride = opts.stride ?? 1;
+  const minScore = opts.minScore ?? 0.50;
   const returnBest = !!opts.returnBest;
 
-  // Render needle image to ImageData
-  const nc = document.createElement("canvas");
-  nc.width = needleImg.width;
-  nc.height = needleImg.height;
-  const nctx = nc.getContext("2d", { willReadFrequently: true });
-  nctx.drawImage(needleImg, 0, 0);
-  const needle = nctx.getImageData(0, 0, nc.width, nc.height).data;
+  if (!hay || !needle) return null;
 
-  const nw = nc.width;
-  const nh = nc.height;
+  const hw = hay.width, hh = hay.height;
+  const nw = needle.width, nh = needle.height;
+  if (nw <= 0 || nh <= 0 || nw > hw || nh > hh) return null;
 
-  if (nw <= 0 || nh <= 0 || nw > cw || nh > ch) return null;
-
-  // Build sample coordinates for the needle
-  const xs = [];
-  for (let x = 0; x < nw; x += stride) xs.push(x);
-  const ys = [];
-  for (let y = 0; y < nh; y += stride) ys.push(y);
-
-  const total = xs.length * ys.length;
-  if (total <= 0) return null;
+  const hdata = hay.data;
+  const ndata = needle.data;
 
   let bestScore = -1;
-  let bestX = 0, bestY = 0;
+  let best = null;
 
-  const h = haystack.data;
+  // precompute needle luminance for stability
+  const nLum = new Uint8Array(nw * nh);
+  for (let j = 0; j < nh; j++) {
+    for (let i = 0; i < nw; i++) {
+      const idx = (j * nw + i) * 4;
+      const r = ndata[idx], g = ndata[idx + 1], b = ndata[idx + 2];
+      nLum[j * nw + i] = (r * 30 + g * 59 + b * 11) / 100;
+    }
+  }
 
-  for (let y = 0; y <= ch - nh; y += step) {
-    for (let x = 0; x <= cw - nw; x += step) {
-      let matched = 0;
+  const maxDiff = tolerance;
+  const total = nw * nh;
 
-      for (let yi = 0; yi < ys.length; yi++) {
-        const ny = ys[yi];
-        const hayRow = ((y + ny) * cw + x) * 4;
-        const nedRow = (ny * nw) * 4;
+  for (let y = 0; y <= hh - nh; y += stride) {
+    for (let x = 0; x <= hw - nw; x += stride) {
+      let good = 0;
 
-        for (let xi = 0; xi < xs.length; xi++) {
-          const nx = xs[xi];
-          const hi = hayRow + nx * 4;
-          const ni = nedRow + nx * 4;
+      for (let j = 0; j < nh; j++) {
+        const hy = y + j;
+        for (let i = 0; i < nw; i++) {
+          const hx = x + i;
+          const hIdx = (hy * hw + hx) * 4;
+          const r = hdata[hIdx], g = hdata[hIdx + 1], b = hdata[hIdx + 2];
+          const hL = (r * 30 + g * 59 + b * 11) / 100;
 
-          if (
-            Math.abs(h[hi]     - needle[ni])     <= tolerance &&
-            Math.abs(h[hi + 1] - needle[ni + 1]) <= tolerance &&
-            Math.abs(h[hi + 2] - needle[ni + 2]) <= tolerance
-          ) {
-            matched++;
-          }
+          const d = Math.abs(hL - nLum[j * nw + i]);
+          if (d <= maxDiff) good++;
         }
       }
 
-      const score = matched / total;
+      const score = good / total;
+
       if (score > bestScore) {
         bestScore = score;
-        bestX = x;
-        bestY = y;
+        best = { x, y, w: nw, h: nh };
       }
 
       if (score >= minScore) {
-        return {
-          x,
-          y,
-          w: nw,
-          h: nh,
-          score,
-          passed: true,
-          best: { x, y, w: nw, h: nh }
-        };
+        return returnBest
+          ? { ok: true, x, y, w: nw, h: nh, score, best }
+          : { x, y, w: nw, h: nh };
       }
     }
   }
 
-  if (!returnBest) return null;
-
-  return {
-    x: bestX,
-    y: bestY,
-    w: nw,
-    h: nh,
-    score: bestScore < 0 ? 0 : bestScore,
-    passed: false,
-    best: { x: bestX, y: bestY, w: nw, h: nh }
-  };
+  return returnBest ? { ok: false, score: bestScore, best } : null;
 }
