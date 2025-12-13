@@ -4,6 +4,15 @@ const statusEl = document.getElementById("status");
 const modeEl   = document.getElementById("mode");
 const lockEl   = document.getElementById("lock");
 const dbgEl    = document.getElementById("debugBox");
+dbg(
+  `ProgFlash v=${Date.now()}\n` +
+  `alt1: ${!!window.alt1}\n` +
+  `overlay: ${window.alt1 ? alt1.permissionOverlay : false}\n` +
+  `capture: ${window.alt1 ? alt1.permissionPixel : false}\n` +
+  `rsX=${window.alt1 ? alt1.rsX : "n/a"} rsY=${window.alt1 ? alt1.rsY : "n/a"}\n` +
+  `rsW=${window.alt1 ? alt1.rsWidth : "n/a"} rsH=${window.alt1 ? alt1.rsHeight : "n/a"}`
+);
+
 
 const startBtn = document.getElementById("startBtn");
 const stopBtn  = document.getElementById("stopBtn");
