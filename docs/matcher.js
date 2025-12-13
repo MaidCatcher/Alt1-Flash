@@ -1,8 +1,4 @@
 // matcher.js
-// Provides:
-// - captureRs(): ImageData | null
-// - loadImage(url): Promise<ImageData>
-// - findAnchor(haystackImg, needleImg, opts)
 
 function toImageData(maybe) {
   if (!maybe) return null;
@@ -12,8 +8,7 @@ function toImageData(maybe) {
     return maybe;
   }
 
-  // Some Alt1 captures return a "ref" with toData() / toDataArray() / etc.
-  // Try common conversions safely.
+  // Alt1 capture-handle conversions (vary by Alt1 build)
   try {
     if (typeof maybe.toData === "function") return maybe.toData();
   } catch {}
@@ -28,25 +23,53 @@ export function captureRs() {
   if (!window.alt1) return null;
   if (!alt1.permissionPixel) return null;
 
-  const x = alt1.rsX ?? 0;
-  const y = alt1.rsY ?? 0;
-  const w = alt1.rsWidth;
-  const h = alt1.rsHeight;
+  const x = Number.isFinite(alt1.rsX) ? alt1.rsX : 0;
+  const y = Number.isFinite(alt1.rsY) ? alt1.rsY : 0;
+  const w = Number.isFinite(alt1.rsWidth) ? alt1.rsWidth : 0;
+  const h = Number.isFinite(alt1.rsHeight) ? alt1.rsHeight : 0;
 
-  if (!w || !h) return null;
-
-  try {
-    const img = alt1.capture(x, y, w, h);
-    if (img && img.width && img.height) {
-      return img;
-    }
-  } catch (e) {
-    console.error("capture failed", e);
+  // If RS viewport info isn't available, try a generic captureHold fallback.
+  if (!w || !h) {
+    try {
+      if (typeof alt1.captureHold === "function") {
+        const out = alt1.captureHold();
+        const img = toImageData(out);
+        if (img) return img;
+      }
+    } catch {}
+    return null;
   }
+
+  // Prefer region capture of the RS viewport
+  // Try alt1.capture first
+  try {
+    if (typeof alt1.capture === "function") {
+      const out = alt1.capture(x, y, w, h);
+      const img = toImageData(out);
+      if (img) return img;
+    }
+  } catch {}
+
+  // Then try alt1.captureHold with region args
+  try {
+    if (typeof alt1.captureHold === "function") {
+      const out = alt1.captureHold(x, y, w, h);
+      const img = toImageData(out);
+      if (img) return img;
+    }
+  } catch {}
+
+  // Last resort: captureHold() without args
+  try {
+    if (typeof alt1.captureHold === "function") {
+      const out = alt1.captureHold();
+      const img = toImageData(out);
+      if (img) return img;
+    }
+  } catch {}
 
   return null;
 }
-
 
 export async function loadImage(url) {
   const img = new Image();
@@ -66,7 +89,7 @@ export async function loadImage(url) {
   return ctx.getImageData(0, 0, c.width, c.height);
 }
 
-// Simple template match with tolerance/stride/minScore and optional returnBest
+// Luma-based template match with options and returnBest support
 export function findAnchor(hay, needle, opts = {}) {
   const tolerance = opts.tolerance ?? 65;
   const stride = opts.stride ?? 1;
@@ -77,15 +100,12 @@ export function findAnchor(hay, needle, opts = {}) {
 
   const hw = hay.width, hh = hay.height;
   const nw = needle.width, nh = needle.height;
-  if (nw <= 0 || nh <= 0 || nw > hw || nh > hh) return null;
+  if (nw <= 0 || nh <= 0 || nw > hw || nh > hh) return returnBest ? { ok: false, score: 0, best: null } : null;
 
   const hdata = hay.data;
   const ndata = needle.data;
 
-  let bestScore = -1;
-  let best = null;
-
-  // precompute needle luminance for stability
+  // Precompute needle luminance
   const nLum = new Uint8Array(nw * nh);
   for (let j = 0; j < nh; j++) {
     for (let i = 0; i < nw; i++) {
@@ -95,8 +115,9 @@ export function findAnchor(hay, needle, opts = {}) {
     }
   }
 
-  const maxDiff = tolerance;
   const total = nw * nh;
+  let bestScore = -1;
+  let best = null;
 
   for (let y = 0; y <= hh - nh; y += stride) {
     for (let x = 0; x <= hw - nw; x += stride) {
@@ -111,7 +132,7 @@ export function findAnchor(hay, needle, opts = {}) {
           const hL = (r * 30 + g * 59 + b * 11) / 100;
 
           const d = Math.abs(hL - nLum[j * nw + i]);
-          if (d <= maxDiff) good++;
+          if (d <= tolerance) good++;
         }
       }
 
