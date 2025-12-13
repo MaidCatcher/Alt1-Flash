@@ -1,142 +1,223 @@
-// app.js — NO imports, Alt1-compatible
-(function () {
-  const statusEl = document.getElementById("status");
-  const modeEl   = document.getElementById("mode");
-  const lockEl   = document.getElementById("lock");
-  const dbgEl    = document.getElementById("debugBox");
+// app.js (Alt1-compatible: NO imports/modules)
 
-  const startBtn = document.getElementById("startBtn");
-  const stopBtn  = document.getElementById("stopBtn");
-  const testBtn  = document.getElementById("testFlashBtn");
+const statusEl = document.getElementById("status");
+const modeEl   = document.getElementById("mode");
+const lockEl   = document.getElementById("lock");
+const dbgEl    = document.getElementById("debugBox");
 
-  function setStatus(v){ statusEl.textContent = v; }
-  function setMode(v){ modeEl.textContent = v; }
-  function setLock(v){ lockEl.textContent = v; }
-  function dbg(v){ dbgEl.textContent = String(v); }
+const startBtn = document.getElementById("startBtn");
+const stopBtn  = document.getElementById("stopBtn");
+const testBtn  = document.getElementById("testFlashBtn");
 
-  const APP_V = Date.now();
+function setStatus(v){ statusEl.textContent = v; }
+function setMode(v){ modeEl.textContent = v; }
+function setLock(v){ lockEl.textContent = v; }
+function dbg(v){ dbgEl.textContent = String(v); }
 
-  let running = false;
-  let loop = null;
-  let anchor = null;
+function rgba(r,g,b,a=255){
+  return (r&255)|((g&255)<<8)|((b&255)<<16)|((a&255)<<24);
+}
 
-  let flashing = false;
-  async function flashOverlay() {
-    if (!window.alt1 || !alt1.permissionOverlay || flashing) return;
-    flashing = true;
-    try {
-      alt1.overLaySetGroup("progflash");
-      alt1.overLayText("PROGFLASH", -16776961, 22, 30, 53, 900);
-      await new Promise(r => setTimeout(r, 250));
-      alt1.overLayClearGroup("progflash");
-    } finally {
-      flashing = false;
+function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+const APP_V = Date.now();
+
+// ---- Overlay flash (safe) ----
+let flashing = false;
+let lastFlashAt = 0;
+const FLASH_COOLDOWN_MS = 1500;
+
+async function flashOverlay({ cycles = 3, intervalMs = 300 } = {}) {
+  if (!window.alt1 || !alt1.permissionOverlay) return;
+
+  const now = Date.now();
+  if (now - lastFlashAt < FLASH_COOLDOWN_MS) return;
+  lastFlashAt = now;
+
+  if (flashing) return;
+  flashing = true;
+
+  const g = "progflash_flash";
+  try {
+    for (let i = 0; i < cycles; i++) {
+      alt1.overLaySetGroup(g);
+      alt1.overLayText("PROGFLASH", -16776961, 22, 30, 53, 800);
+      await sleep(intervalMs);
+      alt1.overLayClearGroup(g);
+      await sleep(intervalMs);
     }
+  } finally {
+    try {
+      alt1.overLaySetGroup(g);
+      alt1.overLayClearGroup(g);
+    } catch {}
+    flashing = false;
   }
+}
 
-  function captureDebugPrefix() {
-    const diag = window.progflashCaptureDiag || {};
-    const alt1Keys = window.alt1 ? Object.keys(alt1).filter(k => k.toLowerCase().includes("capture")) : [];
-    const alt1Fns  = window.alt1 ? alt1Keys.filter(k => typeof alt1[k] === "function") : [];
-    const alt1Props = window.alt1 ? alt1Keys.filter(k => typeof alt1[k] !== "function") : [];
-    return (
+function clearDebugOverlay() {
+  if (!window.alt1 || !alt1.permissionOverlay) return;
+  alt1.overLaySetGroup("progflash_debug");
+  alt1.overLayClearGroup("progflash_debug");
+}
+
+// ---- State ----
+let running = false;
+let loop = null;
+let anchor = null;
+
+async function start() {
+  if (!window.alt1) { alert("Open this inside Alt1."); return; }
+
+  if (!alt1.permissionPixel || !alt1.permissionOverlay) {
+    setStatus("Missing permissions");
+    dbg(
       `ProgFlash v=${APP_V}\n` +
-      `anchor=${anchor ? anchor.width + "x" + anchor.height : "?"}\n` +
-      `rsX=${window.alt1 ? alt1.rsX : "n/a"} rsY=${window.alt1 ? alt1.rsY : "n/a"}\n` +
-      `rsW=${window.alt1 ? alt1.rsWidth : "n/a"} rsH=${window.alt1 ? alt1.rsHeight : "n/a"}\n` +
-      `native captureRs: ${typeof window.captureRs}\n` +
-      `native captureEvents: ${typeof window.captureEvents}\n` +
-      `captureMode: ${diag.captureMode || ""}\n` +
-      `cbCount: ${diag.cbCount || 0}\n` +
-      `argSample: ${diag.argSample || ""}\n` +
-      `lastErr: ${diag.lastErr || ""}\n` +
-      `alt1.capture fns: ${alt1Fns.length ? alt1Fns.join(",") : "(none)"}\n` +
-      `alt1.capture props: ${alt1Props.length ? alt1Props.join(",") : "(none)"}\n`
+      `alt1: ${!!window.alt1}\n` +
+      `overlay: ${alt1.permissionOverlay}\n` +
+      `capture: ${alt1.permissionPixel}\n` +
+      `\nEnable 'View screen' + 'Show overlay' in Alt1.`
     );
+    return;
   }
 
-  function stop() {
-    running = false;
-    if (loop) clearInterval(loop);
-    loop = null;
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
-    setMode("Not running");
-    setStatus("Idle");
-    setLock("none");
+  if (!window.loadImage || !window.captureRs || !window.findAnchor) {
+    setStatus("matcher.js not loaded");
+    dbg(
+      `ProgFlash v=${APP_V}\n` +
+      `Missing matcher globals.\n` +
+      `Make sure matcher.js loads BEFORE app.js in index.html.`
+    );
+    return;
   }
 
-  function tick() {
+  if (!anchor) {
+    setStatus("Loading anchor…");
+    anchor = await window.loadImage("./img/progbar_anchor.png?v=" + APP_V);
+  }
+
+  running = true;
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+
+  setMode("Running");
+  setStatus("Searching…");
+  setLock("none");
+  clearDebugOverlay();
+
+  if (loop) clearInterval(loop);
+
+  loop = setInterval(() => {
     if (!running) return;
 
-    const img = window.progflashCaptureRs ? window.progflashCaptureRs() : null;
+    const img = window.captureRs();
     if (!img) {
-      dbg(captureDebugPrefix() + `captureRs(): null (capture failed)`);
+      const capFns = window.alt1
+        ? Object.keys(alt1).filter(k => k.toLowerCase().includes("capture")).sort().join(",")
+        : "n/a";
+
+      dbg(
+        `ProgFlash v=${APP_V}\n` +
+        `anchor=${anchor.width}x${anchor.height}\n` +
+        `rsX=${alt1.rsX} rsY=${alt1.rsY}\n` +
+        `rsW=${alt1.rsWidth} rsH=${alt1.rsHeight}\n` +
+        `captureFns=${capFns}\n` +
+        `captureRs(): null (capture failed)`
+      );
       return;
     }
 
-    const res = window.progflashFindAnchor(img, anchor, {
+    const res = window.findAnchor(img, anchor, {
       tolerance: 65,
       stride: 1,
-      minScore: 0.5,
+      minScore: 0.50,
       returnBest: true
     });
 
     const scoreTxt = (res && typeof res.score === "number") ? res.score.toFixed(3) : "n/a";
     dbg(
-      captureDebugPrefix() +
+      `ProgFlash v=${APP_V}\n` +
       `img=${img.width}x${img.height}\n` +
+      `anchor=${anchor.width}x${anchor.height}\n` +
       `best score=${scoreTxt}\n` +
       `ok=${!!(res && res.ok)}`
     );
 
+    if (res && res.best && alt1.permissionOverlay) {
+      if (res.score >= 0.30) {
+        alt1.overLaySetGroup("progflash_debug");
+        alt1.overLayRect(
+          rgba(255, 255, 0, 180),
+          (alt1.rsX || 0) + res.best.x,
+          (alt1.rsY || 0) + res.best.y,
+          res.best.w,
+          res.best.h,
+          200,
+          2
+        );
+      } else {
+        clearDebugOverlay();
+      }
+    }
+
     if (res && res.ok) {
       setStatus("Locked");
       setLock(`x=${res.x}, y=${res.y}`);
-      flashOverlay();
+      flashOverlay().catch(console.error);
     } else {
       setStatus("Searching…");
       setLock("none");
     }
-  }
+  }, 200);
+}
 
-  async function start() {
-    if (!window.alt1) { setStatus("Not in Alt1"); return; }
-    if (!alt1.permissionPixel || !alt1.permissionOverlay) {
-      setStatus("Missing permissions");
-      dbg(`ProgFlash v=${APP_V}\noverlay=${alt1.permissionOverlay}\ncapture=${alt1.permissionPixel}`);
-      return;
-    }
-    if (!window.progflashLoadImage || !window.progflashFindAnchor || !window.progflashCaptureRs) {
-      setStatus("Missing matcher globals");
-      dbg("matcher.js not loaded before app.js");
-      return;
-    }
+function stop() {
+  running = false;
+  if (loop) clearInterval(loop);
+  loop = null;
 
-    if (!anchor) {
-      setStatus("Loading anchor…");
-      anchor = await window.progflashLoadImage("./img/progbar_anchor.png?v=" + APP_V);
-    }
+  if (window.alt1 && alt1.captureInterval) {
+  try {
+    alt1.captureInterval(0, 0, 0, 0, 0); // stop capture
+  } catch {}
+}
 
-    running = true;
-    startBtn.disabled = true;
-    stopBtn.disabled = false;
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
 
-    setMode("Running");
-    setStatus("Searching…");
-    setLock("none");
-
-    tick(); // capture immediately
-    if (loop) clearInterval(loop);
-    loop = setInterval(tick, 200);
-  }
-
-  startBtn.onclick = () => start().catch(console.error);
-  stopBtn.onclick  = () => stop();
-  testBtn.onclick  = () => flashOverlay();
-
-  setStatus("Idle");
   setMode("Not running");
+  setStatus("Idle");
   setLock("none");
-  dbg("Ready…");
-})();
+  clearDebugOverlay();
+}
+
+// Buttons
+testBtn.onclick = () => {
+  setStatus("Test flash");
+  flashOverlay().catch(console.error);
+};
+
+startBtn.onclick = () => {
+  start().catch(e => {
+    console.error(e);
+    setStatus("Error (see console)");
+  });
+};
+
+stopBtn.onclick = () => stop();
+
+// Init
+setStatus("Idle");
+setMode("Not running");
+setLock("none");
+
+if (window.alt1) {
+  dbg(
+    `ProgFlash v=${APP_V}\n` +
+    `alt1: true\n` +
+    `overlay: ${alt1.permissionOverlay}\n` +
+    `capture: ${alt1.permissionPixel}`
+  );
+} else {
+  dbg(`ProgFlash v=${APP_V}\nalt1: false`);
+}
