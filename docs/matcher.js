@@ -1,93 +1,41 @@
-// matcher.js (Alt1-compatible: NO ES modules)
-// ProgFlash capture + image matcher without relying on Alt1 version-specific APIs.
-// Exposes on window:
-//   - progflashCaptureRs(): ImageData | null
-//   - progflashLoadImage(url): Promise<ImageData>
-//   - progflashFindAnchor(haystack, needle, opts): match result
+// matcher.js — classic script (NO import/export). Must be loaded before app.js.
+//
+// Exposes:
+//   window.progflashCaptureRs()  -> ImageData | null
+//   window.progflashLoadImage(url) -> Promise<ImageData>
+//   window.progflashFindAnchor(hay, needle, opts) -> {ok, x,y,w,h, score, best}
 
-function isImageDataLike(obj) {
-  return !!(obj && obj.data && typeof obj.width === "number" && typeof obj.height === "number");
-}
+function _toImageData(maybe) {
+  if (!maybe) return null;
 
-function toImageData(obj) {
-  if (!obj) return null;
-  if (isImageDataLike(obj)) return obj;
+  // Already ImageData-like
+  if (maybe.data && typeof maybe.width === "number" && typeof maybe.height === "number") {
+    return maybe;
+  }
 
-  // Some capture handles expose conversion helpers
-  try {
-    if (typeof obj.toData === "function") {
-      const out = obj.toData();
-      if (isImageDataLike(out)) return out;
-    }
-  } catch {}
-  try {
-    if (typeof obj.toImageData === "function") {
-      const out = obj.toImageData();
-      if (isImageDataLike(out)) return out;
-    }
-  } catch {}
+  // Some Alt1 capture handles expose converters
+  try { if (typeof maybe.toData === "function") return maybe.toData(); } catch {}
+  try { if (typeof maybe.toImageData === "function") return maybe.toImageData(); } catch {}
+
   return null;
 }
 
-/**
- * Capture RuneScape viewport pixels.
- * Your Alt1 build exposes captureInterval/captureMethod as *properties* only,
- * and does not expose alt1.capture()/alt1.captureHold().
- *
- * Alt1 itself typically injects a global captureRs() function in some builds.
- * We will use it if present; otherwise we fall back to a1lib capture if available.
- */
 function progflashCaptureRs() {
-  // 1) Prefer any existing global captureRs() provided by Alt1/runtime
+  // Alt1 injects a global captureRs() on some builds.
+  // IMPORTANT: do NOT define a top-level function named captureRs in this file;
+  // that would clobber Alt1's native one.
   try {
-    if (typeof window.captureRs === "function" && window.captureRs !== progflashCaptureRs) {
-      // Try no-args first (most common)
-      let cap = window.captureRs();
-      let img = toImageData(cap);
-      if (img) return img;
-
-      // Try with RS viewport args if it expects them
-      if (window.alt1 && (window.captureRs.length >= 4)) {
-        const x = alt1.rsX || 0;
-        const y = alt1.rsY || 0;
-        const w = alt1.rsWidth || 0;
-        const h = alt1.rsHeight || 0;
-        cap = window.captureRs(x, y, w, h);
-        img = toImageData(cap);
-        if (img) return img;
-      }
-    }
-  } catch (e) {
-    console.error("global captureRs() failed", e);
-  }
-
-  // 2) Fallback: a1lib capture (not present in all web app contexts)
-  try {
-    if (window.a1lib && typeof a1lib.captureHoldFullRs === "function") {
-      const cap = a1lib.captureHoldFullRs();
-      const img = toImageData(cap);
+    if (typeof window.captureRs === "function") {
+      const out = window.captureRs();
+      const img = _toImageData(out);
       if (img) return img;
     }
   } catch (e) {
-    console.error("a1lib.captureHoldFullRs failed", e);
+    console.error("native window.captureRs() threw", e);
   }
 
-  try {
-    if (window.a1lib && typeof a1lib.captureHold === "function" && window.alt1) {
-      const x = alt1.rsX || 0;
-      const y = alt1.rsY || 0;
-      const w = alt1.rsWidth || 0;
-      const h = alt1.rsHeight || 0;
-      if (w && h) {
-        const cap = a1lib.captureHold(x, y, w, h);
-        const img = toImageData(cap);
-        if (img) return img;
-      }
-    }
-  } catch (e) {
-    console.error("a1lib.captureHold failed", e);
-  }
-
+  // Some builds expose captureEvents() instead. We don't know its signature,
+  // so just report it's present via app.js debug; return null here.
   return null;
 }
 
@@ -96,7 +44,6 @@ function progflashLoadImage(url) {
     const img = new Image();
     img.crossOrigin = "anonymous";
     img.src = url;
-
     img.onload = () => {
       const c = document.createElement("canvas");
       c.width = img.naturalWidth;
@@ -105,23 +52,23 @@ function progflashLoadImage(url) {
       ctx.drawImage(img, 0, 0);
       resolve(ctx.getImageData(0, 0, c.width, c.height));
     };
-
     img.onerror = reject;
   });
 }
 
-// Luma-based template match with options and returnBest support
-function progflashFindAnchor(hay, needle, opts = {}) {
-  if (!hay || !needle) return null;
-
+// Luma-based template match (small anchors)
+function progflashFindAnchor(hay, needle, opts) {
+  opts = opts || {};
   const tolerance = opts.tolerance ?? 65;
   const stride = opts.stride ?? 1;
-  const minScore = opts.minScore ?? 0.5;
+  const minScore = opts.minScore ?? 0.50;
   const returnBest = !!opts.returnBest;
+
+  if (!hay || !needle) return null;
 
   const hw = hay.width, hh = hay.height;
   const nw = needle.width, nh = needle.height;
-  if (nw > hw || nh > hh) {
+  if (nw <= 0 || nh <= 0 || nw > hw || nh > hh) {
     return returnBest ? { ok: false, score: 0, best: null } : null;
   }
 
@@ -133,7 +80,7 @@ function progflashFindAnchor(hay, needle, opts = {}) {
   for (let j = 0; j < nh; j++) {
     for (let i = 0; i < nw; i++) {
       const idx = (j * nw + i) * 4;
-      nLum[j * nw + i] = (n[idx] * 30 + n[idx + 1] * 59 + n[idx + 2] * 11) / 100;
+      nLum[j * nw + i] = (n[idx] * 30 + n[idx+1] * 59 + n[idx+2] * 11) / 100;
     }
   }
 
@@ -148,7 +95,7 @@ function progflashFindAnchor(hay, needle, opts = {}) {
       for (let j = 0; j < nh; j++) {
         for (let i = 0; i < nw; i++) {
           const hi = ((y + j) * hw + (x + i)) * 4;
-          const lum = (h[hi] * 30 + h[hi + 1] * 59 + h[hi + 2] * 11) / 100;
+          const lum = (h[hi] * 30 + h[hi+1] * 59 + h[hi+2] * 11) / 100;
           if (Math.abs(lum - nLum[j * nw + i]) <= tolerance) good++;
         }
       }
@@ -171,7 +118,6 @@ function progflashFindAnchor(hay, needle, opts = {}) {
   return returnBest ? { ok: false, score: bestScore, best } : null;
 }
 
-// Expose without clobbering other libs
 window.progflashCaptureRs = progflashCaptureRs;
 window.progflashLoadImage = progflashLoadImage;
 window.progflashFindAnchor = progflashFindAnchor;
