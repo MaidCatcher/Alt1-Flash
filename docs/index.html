@@ -30,14 +30,14 @@
 
   <div class="row">
     <small>
-      Put <code>img/progbar_anchor.png</code> as a tiny crop of the bar’s interior. Start crafting so the bar is visible, then hit <b>Start</b>.
+      Put <code>img/progbar_anchor.png</code> as a tiny crop of the bar’s interior.
+      Start crafting so the bar is visible, then hit <b>Start</b>.
     </small>
   </div>
 
   <pre id="debugBox">Loading…</pre>
 
   <script>
-    // Better error surfaces (so we don't get [object Object])
     window.addEventListener("error", (e) => {
       const pre = document.createElement("pre");
       pre.className = "err";
@@ -59,8 +59,8 @@
     });
   </script>
 
-  <!-- IMPORTANT: classic scripts; matcher must load BEFORE app -->
-  <script src="./matcher.js?v=1765637000001"></script>
-  <script src="./app.js?v=1765637000001"></script>
+  <!-- IMPORTANT: classic scripts (Alt1-safe), matcher first -->
+  <script src="./matcher.js?v=1"></script>
+  <script src="./app.js?v=1"></script>
 </body>
 </html>

@@ -1,32 +1,69 @@
 // matcher.js (Alt1-compatible: NO ES modules)
-// Exposes: window.captureRs, window.loadImage, window.findAnchor
-//
-// IMPORTANT: Your Alt1 build does NOT provide callable alt1.capture()/alt1.captureHold()/alt1.captureMethod().
-// Use a1lib capture instead (this is what most Alt1 apps rely on).
+// ProgFlash capture + image matcher without relying on Alt1 version-specific APIs.
+// Exposes on window:
+//   - progflashCaptureRs(): ImageData | null
+//   - progflashLoadImage(url): Promise<ImageData>
+//   - progflashFindAnchor(haystack, needle, opts): match result
 
-function toImageData(cap) {
-  if (!cap) return null;
+function isImageDataLike(obj) {
+  return !!(obj && obj.data && typeof obj.width === "number" && typeof obj.height === "number");
+}
 
-  // Already ImageData-like
-  if (cap.data && typeof cap.width === "number" && typeof cap.height === "number") {
-    return cap;
-  }
+function toImageData(obj) {
+  if (!obj) return null;
+  if (isImageDataLike(obj)) return obj;
 
-  // Capture handle conversions (vary by Alt1 build)
-  try { if (typeof cap.toData === "function") return cap.toData(); } catch {}
-  try { if (typeof cap.toImageData === "function") return cap.toImageData(); } catch {}
-
+  // Some capture handles expose conversion helpers
+  try {
+    if (typeof obj.toData === "function") {
+      const out = obj.toData();
+      if (isImageDataLike(out)) return out;
+    }
+  } catch {}
+  try {
+    if (typeof obj.toImageData === "function") {
+      const out = obj.toImageData();
+      if (isImageDataLike(out)) return out;
+    }
+  } catch {}
   return null;
 }
 
-function captureRs() {
-  // Prefer a1lib (most consistent across Alt1 builds)
-  if (!window.a1lib) return null;
-  if (window.alt1 && !alt1.permissionPixel) return null;
-
-  // 1) Best option: full RuneScape capture
+/**
+ * Capture RuneScape viewport pixels.
+ * Your Alt1 build exposes captureInterval/captureMethod as *properties* only,
+ * and does not expose alt1.capture()/alt1.captureHold().
+ *
+ * Alt1 itself typically injects a global captureRs() function in some builds.
+ * We will use it if present; otherwise we fall back to a1lib capture if available.
+ */
+function progflashCaptureRs() {
+  // 1) Prefer any existing global captureRs() provided by Alt1/runtime
   try {
-    if (typeof a1lib.captureHoldFullRs === "function") {
+    if (typeof window.captureRs === "function" && window.captureRs !== progflashCaptureRs) {
+      // Try no-args first (most common)
+      let cap = window.captureRs();
+      let img = toImageData(cap);
+      if (img) return img;
+
+      // Try with RS viewport args if it expects them
+      if (window.alt1 && (window.captureRs.length >= 4)) {
+        const x = alt1.rsX || 0;
+        const y = alt1.rsY || 0;
+        const w = alt1.rsWidth || 0;
+        const h = alt1.rsHeight || 0;
+        cap = window.captureRs(x, y, w, h);
+        img = toImageData(cap);
+        if (img) return img;
+      }
+    }
+  } catch (e) {
+    console.error("global captureRs() failed", e);
+  }
+
+  // 2) Fallback: a1lib capture (not present in all web app contexts)
+  try {
+    if (window.a1lib && typeof a1lib.captureHoldFullRs === "function") {
       const cap = a1lib.captureHoldFullRs();
       const img = toImageData(cap);
       if (img) return img;
@@ -35,9 +72,8 @@ function captureRs() {
     console.error("a1lib.captureHoldFullRs failed", e);
   }
 
-  // 2) Fallback: capture the RS viewport region (screen coords)
   try {
-    if (typeof a1lib.captureHold === "function" && window.alt1) {
+    if (window.a1lib && typeof a1lib.captureHold === "function" && window.alt1) {
       const x = alt1.rsX || 0;
       const y = alt1.rsY || 0;
       const w = alt1.rsWidth || 0;
@@ -55,7 +91,7 @@ function captureRs() {
   return null;
 }
 
-function loadImage(url) {
+function progflashLoadImage(url) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = "anonymous";
@@ -74,13 +110,13 @@ function loadImage(url) {
   });
 }
 
-// Luma-based template match w/ options and returnBest support
-function findAnchor(hay, needle, opts = {}) {
+// Luma-based template match with options and returnBest support
+function progflashFindAnchor(hay, needle, opts = {}) {
   if (!hay || !needle) return null;
 
   const tolerance = opts.tolerance ?? 65;
   const stride = opts.stride ?? 1;
-  const minScore = opts.minScore ?? 0.50;
+  const minScore = opts.minScore ?? 0.5;
   const returnBest = !!opts.returnBest;
 
   const hw = hay.width, hh = hay.height;
@@ -135,6 +171,7 @@ function findAnchor(hay, needle, opts = {}) {
   return returnBest ? { ok: false, score: bestScore, best } : null;
 }
 
-window.captureRs = captureRs;
-window.loadImage = loadImage;
-window.findAnchor = findAnchor;
+// Expose without clobbering other libs
+window.progflashCaptureRs = progflashCaptureRs;
+window.progflashLoadImage = progflashLoadImage;
+window.progflashFindAnchor = progflashFindAnchor;
