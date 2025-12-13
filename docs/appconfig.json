@@ -1,13 +1,13 @@
 {
   "appName": "ProgFlash",
-  "description": "Flashes overlay when RS3 skilling progress bar ends (Make-X / gem cutting etc.)",
-  "appUrl": "https://maidcatcher.github.io/Alt1-Flash/",
-  "configUrl": "https://maidcatcher.github.io/Alt1-Flash/",
-  "iconUrl": "https://runeapps.org/alt1/icon.png",
-  "defaultWidth": 360,
-  "defaultHeight": 220,
-  "minWidth": 320,
-  "minHeight": 200,
-  "requestOverlay": true,
-  "requestCapture": true
+  "description": "ProgFlash lock debugger",
+  "appUrl": "index.html",
+  "iconUrl": "icon.png",
+  "defaultWidth": 320,
+  "defaultHeight": 420,
+  "request": [
+    "pixel",
+    "overlay"
+  ],
+  "version": "1765632483"
 }

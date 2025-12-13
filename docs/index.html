@@ -3,49 +3,38 @@
 <head>
   <meta charset="utf-8" />
   <title>ProgFlash</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     body { font-family: sans-serif; margin: 12px; }
-    button { padding: 8px 10px; margin-right: 8px; }
-    .row { margin: 10px 0; }
-    .status { padding: 8px; background:#f2f2f2; border-radius: 6px; }
-    pre { white-space: pre-wrap; background:#000; color:#00ff00; padding:8px; border-radius: 6px; }
-    .err { white-space: pre-wrap; background:#fee; border:1px solid #f99; padding:8px; border-radius:6px; }
-    code { background:#eee; padding:2px 4px; border-radius:4px; }
+    #debugBox {
+      margin-top: 10px;
+      background: #000;
+      color: #0f0;
+      padding: 10px;
+      white-space: pre;
+      border-radius: 6px;
+    }
+    button { margin-right: 8px; }
   </style>
 </head>
 <body>
-  <h3>ProgFlash</h3>
-
-  <div class="row">
+  <h2>ProgFlash</h2>
+  <div>
     <button id="startBtn">Start</button>
     <button id="stopBtn" disabled>Stop</button>
     <button id="testFlashBtn">Test flash</button>
   </div>
 
-  <div class="row status">
+  <div style="margin-top:12px; padding:10px; background:#eee; border-radius:6px;">
     <div><b>Status:</b> <span id="status">Idle</span></div>
     <div><b>Mode:</b> <span id="mode">Not running</span></div>
     <div><b>Lock:</b> <span id="lock">none</span></div>
   </div>
 
-  <div class="row">
-    <small>
-      Put <code>img/progbar_anchor.png</code> as a tiny crop of the bar’s left cap. Start crafting so the bar is visible, then hit <b>Start</b>.
-    </small>
-  </div>
+  <p>Put <code>img/progbar_anchor.png</code> as a tiny crop of the bar’s interior. Start crafting so the bar is visible, then hit Start.</p>
 
-  <pre id="debugBox">Loading…</pre>
+  <div id="debugBox"></div>
 
-  <script>
-    window.onerror = function(msg, src, line, col){
-      const pre = document.createElement("pre");
-      pre.className = "err";
-      pre.textContent = `JS ERROR: ${msg}\n${src}:${line}:${col}`;
-      document.body.prepend(pre);
-    };
-  </script>
-
-  <!-- IMPORTANT: app.js uses import, so it MUST be loaded as a module -->
-  <script type="module" src="./app.js"></script>
+  <script type="module" src="./app.js?v=1765632483"></script>
 </body>
 </html>

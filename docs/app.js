@@ -1,4 +1,6 @@
-import { captureRs, loadImage, findAnchor } from "./matcher.js";
+import { captureRs, loadImage, findAnchor, MATCHER_VERSION } from "./matcher.js?v=1765632483";
+
+const APP_VERSION = "1765632483";
 
 const statusEl = document.getElementById("status");
 const modeEl   = document.getElementById("mode");
@@ -18,49 +20,51 @@ function rgba(r,g,b,a=255){
   return (r&255)|((g&255)<<8)|((b&255)<<16)|((a&255)<<24);
 }
 
-function clearDebug() {
+function clearGroup(name){
   if (!window.alt1 || !alt1.permissionOverlay) return;
-  alt1.overLaySetGroup("progflash_debug");
-  alt1.overLayClearGroup("progflash_debug");
+  alt1.overLaySetGroup(name);
+  alt1.overLayClearGroup(name);
 }
 
-function flashOverlay() {
-  if (!window.alt1) { alert("Open this inside Alt1."); return; }
-  if (!alt1.permissionOverlay) {
-    setStatus("No overlay permission");
-    return;
-  }
+function clearDebug() {
+  clearGroup("progflash_debug");
+}
 
-  const g = "progflash";
-  let i = 0;
+// ---------- Flash (safe; no setInterval storms) ----------
+let flashing = false;
+let lastFlashAt = 0;
+const FLASH_COOLDOWN_MS = 1500;
+function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
 
-  const t = setInterval(() => {
+async function flashOverlay({ cycles = 3, intervalMs = 300 } = {}) {
+  if (!window.alt1 || !alt1.permissionOverlay) return;
+
+  const now = Date.now();
+  if (now - lastFlashAt < FLASH_COOLDOWN_MS) return;
+  lastFlashAt = now;
+
+  if (flashing) return;
+  flashing = true;
+
+  const g = "progflash_flash";
+  const colorBlue = -16776961; // signed 0xFF0000FF
+
+  try {
+    for (let i = 0; i < cycles; i++) {
+      alt1.overLaySetGroup(g);
+      alt1.overLayText("PROGFLASH", colorBlue, 22, 30, 53, 900);
+      await sleep(intervalMs);
+      alt1.overLayClearGroup(g);
+      await sleep(intervalMs);
+    }
+  } finally {
     alt1.overLaySetGroup(g);
-    if (i % 2 === 0) {
-      alt1.overLayRect(
-        rgba(255,0,0,160),
-        alt1.rsX || 0,
-        alt1.rsY || 0,
-        alt1.rsWidth || 800,
-        alt1.rsHeight || 600,
-        200,
-        0
-      );
-    } else {
-      alt1.overLayClearGroup(g);
-    }
-    if (++i >= 10) {
-      alt1.overLayClearGroup(g);
-      clearInterval(t);
-    }
-  }, 200);
+    alt1.overLayClearGroup(g);
+    flashing = false;
+  }
 }
 
-/**
- * captureRs() returns an ImageData-like object.
- * On some setups it can include padding/offsets; this normalizes to the RS viewport
- * using rsX/rsY/rsWidth/rsHeight when needed.
- */
+// ---------- Capture ----------
 function captureRsViewport() {
   const full = captureRs();
   if (!full) return null;
@@ -70,20 +74,12 @@ function captureRsViewport() {
   const x = alt1.rsX || 0;
   const y = alt1.rsY || 0;
 
-  // If it already matches the viewport, use it as-is
-  if (w && h && full.width === w && full.height === h && x === 0 && y === 0) {
-    return full;
-  }
-
-  // If we don't have viewport dims, fall back to full
+  if (w && h && full.width === w && full.height === h && x === 0 && y === 0) return full;
   if (!w || !h) return full;
 
-  // Re-center viewport into (0,0) using a canvas
   const c = document.createElement("canvas");
-  c.width = w;
-  c.height = h;
+  c.width = w; c.height = h;
   const ctx = c.getContext("2d", { willReadFrequently: true });
-
   try {
     ctx.putImageData(full, -x, -y);
     return ctx.getImageData(0, 0, w, h);
@@ -92,13 +88,35 @@ function captureRsViewport() {
   }
 }
 
+// ---------- Main state ----------
 let running = false;
 let anchor = null;
 let lastSeen = 0;
 let loop = null;
-
 let tries = 0;
 let hits = 0;
+
+function drawBestGuess(best) {
+  if (!window.alt1 || !alt1.permissionOverlay) return;
+  if (!best || best.score == null) return;
+
+  if (best.score < 0.40) {
+    clearGroup("progflash_best");
+    return;
+  }
+
+  alt1.overLaySetGroup("progflash_best");
+  alt1.overLayClearGroup("progflash_best");
+  alt1.overLayRect(
+    rgba(255, 215, 0, 120),
+    (alt1.rsX || 0) + best.x,
+    (alt1.rsY || 0) + best.y,
+    best.w,
+    best.h,
+    220,
+    2
+  );
+}
 
 async function start() {
   if (!window.alt1) { alert("Open this inside Alt1."); return; }
@@ -111,17 +129,11 @@ async function start() {
 
   if (!anchor) {
     setStatus("Loading anchor…");
-    anchor = await loadImage("./img/progbar_anchor.png");
-    dbg(
-      "Anchor loaded\n" +
-      "w=" + anchor.width + " h=" + anchor.height + "\n" +
-      "alt1: " + !!window.alt1 + "\n" +
-      "overlay: " + alt1.permissionOverlay + "\n" +
-      "capture: " + alt1.permissionPixel
-    );
+    anchor = await loadImage("./img/progbar_anchor.png?v=1765632483");
   }
 
   running = true;
+
   startBtn.disabled = true;
   stopBtn.disabled = false;
 
@@ -129,10 +141,11 @@ async function start() {
   setStatus("Searching…");
   setLock("none");
   clearDebug();
+  clearGroup("progflash_best");
 
-  tries = 0;
-  hits = 0;
-  lastSeen = 0;
+  tries = 0; hits = 0; lastSeen = 0;
+
+  if (loop) { clearInterval(loop); loop = null; }
 
   loop = setInterval(() => {
     if (!running) return;
@@ -142,57 +155,43 @@ async function start() {
 
     tries++;
 
-    const hit = findAnchor(img, anchor, { tolerance: 65, stride: 1, sampleStride: 1, minScore: 0.50, returnBest: true });
+    const res = findAnchor(img, anchor, { tolerance: 65, stride: 1, minScore: 0.50, returnBest: true });
+    const bestScore = (res && typeof res.score === "number") ? res.score : null;
 
-    // Always show best-match score to help tune the anchor/matcher
-    const bestScore = hit ? (hit.score ?? 0) : 0;
+    dbg(
+      "ProgFlash v=" + APP_VERSION + "\n" +
+      "Matcher v=" + MATCHER_VERSION + "\n" +
+      "anchor w=" + anchor.width + " h=" + anchor.height + "\n" +
+      "tries=" + tries + " hits=" + hits + "\n" +
+      "best score=" + (bestScore == null ? "n/a" : bestScore.toFixed(3))
+    );
 
+    if (res && res.x != null) drawBestGuess(res);
 
-    if (hit && hit.ok) {
+    if (res && res.ok) {
       hits++;
       lastSeen = Date.now();
+
       setStatus("Locked");
-      setLock(`x=${hit.x}, y=${hit.y}`);
+      setLock(`x=${res.x}, y=${res.y}`);
 
-      // BLUE DEBUG BOX (draw exactly where we matched)
-      if (alt1.permissionOverlay) {
-        alt1.overLaySetGroup("progflash_debug");
-        alt1.overLayRect(
-          rgba(0, 120, 255, 200),
-          (alt1.rsX || 0) + hit.x,
-          (alt1.rsY || 0) + hit.y,
-          hit.w,
-          hit.h,
-          300,
-          2
-        );
-      }
-
-      dbg(`Anchor loaded\nw=${anchor.width} h=${anchor.height}\ntries=${tries} hits=${hits}\nlast lock=${hit.x},${hit.y}\nscore=${bestScore.toFixed(3)}`);
+      alt1.overLaySetGroup("progflash_debug");
+      alt1.overLayClearGroup("progflash_debug");
+      alt1.overLayRect(
+        rgba(0, 120, 255, 200),
+        (alt1.rsX || 0) + res.x,
+        (alt1.rsY || 0) + res.y,
+        res.w,
+        res.h,
+        300,
+        2
+      );
       return;
     }
 
-    dbg(`Anchor loaded\nw=${anchor.width} h=${anchor.height}\ntries=${tries} hits=${hits}\nlast lock=none\nbest score=${bestScore.toFixed(3)}`);
-
-    // If we have a best candidate but it didn't pass minScore, draw a faint yellow box
-    // to show where the matcher thinks the closest match is.
-    if (hit && !hit.ok && alt1.permissionOverlay && bestScore >= 0.40) {
-      alt1.overLaySetGroup("progflash_debug");
-      alt1.overLayRect(
-        rgba(255, 220, 0, 120),
-        (alt1.rsX || 0) + hit.x,
-        (alt1.rsY || 0) + hit.y,
-        hit.w,
-        hit.h,
-        250,
-        2
-      );
-    }
-
-
     if (lastSeen && Date.now() - lastSeen > 450) {
       clearDebug();
-      flashOverlay();
+      flashOverlay().catch(console.error);
       lastSeen = 0;
       setStatus("Flashed!");
       setLock("none");
@@ -202,7 +201,7 @@ async function start() {
 
 function stop() {
   running = false;
-  clearInterval(loop);
+  if (loop) clearInterval(loop);
   loop = null;
 
   startBtn.disabled = false;
@@ -211,23 +210,36 @@ function stop() {
   setMode("Not running");
   setStatus("Idle");
   setLock("none");
+
   clearDebug();
+  clearGroup("progflash_best");
+  clearGroup("progflash_flash");
+
+  flashing = false;
 }
 
 testBtn.onclick = () => {
+  console.log("TEST BUTTON CLICKED", Date.now());
   setStatus("Test flash");
-  flashOverlay();
+  flashOverlay().catch(console.error);
 };
 
-startBtn.onclick = () => { start().catch(e => { console.error(e); setStatus("Error (see console)"); }); };
-stopBtn.onclick = stop;
+startBtn.onclick = () => {
+  console.log("START CLICKED", Date.now());
+  start().catch(e => { console.error(e); setStatus("Error (see console)"); });
+};
 
-// Startup state
+stopBtn.onclick = () => {
+  console.log("STOP CLICKED", Date.now());
+  stop();
+};
+
 setStatus("Idle");
 setMode("Not running");
 setLock("none");
-
 dbg(
+  "ProgFlash v=" + APP_VERSION + "\n" +
+  "Matcher v=" + MATCHER_VERSION + "\n" +
   "alt1: " + !!window.alt1 + "\n" +
   "overlay: " + (window.alt1 ? alt1.permissionOverlay : false) + "\n" +
   "capture: " + (window.alt1 ? alt1.permissionPixel : false)
