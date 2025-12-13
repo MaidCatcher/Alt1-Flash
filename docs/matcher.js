@@ -35,7 +35,7 @@
 
       // Some implementations pass (type, payload)
       if (typeof a === "object") {
-        for (const k of ["data", "image", "capture", "payload"]) {
+        for (const k of ["data", "image", "capture", "payload", "detail"]) {
           const v = a[k];
           if (v && v.data && v.width && v.height) return v;
         }
@@ -44,16 +44,41 @@
     return null;
   }
 
+  // NEW: explicitly enable capture on builds where captureEvents won't fire until this is set
+  function enableAlt1Capture() {
+    if (!window.alt1) return;
+
+    try {
+      // captureMethod is a STRING on your build (ex: "OpenGL")
+      if (typeof alt1.captureMethod === "string") {
+        if (!alt1.captureMethod) alt1.captureMethod = "OpenGL";
+        // Keep whatever it is, but if it's empty, force OpenGL
+      } else if (alt1.captureMethod == null) {
+        // In case some builds allow setting it even if it wasn't present
+        alt1.captureMethod = "OpenGL";
+      }
+    } catch (e) {
+      diag.lastErr = `enable captureMethod failed: ${e && e.message ? e.message : String(e)}`;
+    }
+
+    try {
+      // captureInterval is a NUMBER on your build
+      if (typeof alt1.captureInterval === "number") {
+        // Set it even if already set; this is the "arming" signal on some builds
+        alt1.captureInterval = Math.max(50, alt1.captureInterval || 100);
+      } else if (alt1.captureInterval == null) {
+        alt1.captureInterval = 100;
+      }
+    } catch (e) {
+      diag.lastErr = `enable captureInterval failed: ${e && e.message ? e.message : String(e)}`;
+    }
+  }
+
   function ensureCaptureEventsStarted() {
     if (started) return;
     started = true;
 
-    // If captureInterval is a numeric property, set it (enables capture on some builds)
-    try {
-      if (window.alt1 && typeof alt1.captureInterval === "number") {
-        alt1.captureInterval = Math.max(50, alt1.captureInterval || 100);
-      }
-    } catch {}
+    enableAlt1Capture();
 
     if (typeof window.captureEvents !== "function") {
       diag.captureMode = "no captureEvents";
@@ -79,7 +104,7 @@
       }
     };
 
-    // Try calling captureEvents with a callback
+    // ---- Strategy A: subscribe directly (what you already tried) ----
     try {
       window.captureEvents(cb);
       diag.captureMode = "captureEvents(cb)";
@@ -88,28 +113,43 @@
       diag.lastErr = (e && e.message) ? e.message : String(e);
     }
 
-    // Try captureEvents() returning a subscription-like object
+    // ---- Strategy B (NEW): "start" captureEvents first, then subscribe ----
+    // Some native implementations require a priming call before callbacks fire.
     try {
-      const ret = window.captureEvents();
-      diag.captureMode = "captureEvents()";
-      if (ret) {
-        if (typeof ret.on === "function") {
-          ret.on("capture", cb);
-          diag.captureMode = "captureEvents()+ret.on(capture)";
-        } else if (typeof ret.addEventListener === "function") {
-          ret.addEventListener("capture", cb);
-          diag.captureMode = "captureEvents()+ret.addEventListener(capture)";
-        } else if (typeof ret.subscribe === "function") {
-          ret.subscribe(cb);
-          diag.captureMode = "captureEvents()+ret.subscribe";
+      const ret0 = window.captureEvents(); // prime/start
+      // Try again with callback after priming
+      try {
+        window.captureEvents(cb);
+        diag.captureMode = "captureEvents(); captureEvents(cb)";
+        return;
+      } catch (e2) {
+        // If callback form isn't accepted, try attaching to returned object
+        if (ret0) {
+          if (typeof ret0.on === "function") {
+            ret0.on("capture", cb);
+            diag.captureMode = "captureEvents(); ret.on(capture)";
+            return;
+          } else if (typeof ret0.addEventListener === "function") {
+            ret0.addEventListener("capture", cb);
+            diag.captureMode = "captureEvents(); ret.addEventListener(capture)";
+            return;
+          } else if (typeof ret0.subscribe === "function") {
+            ret0.subscribe(cb);
+            diag.captureMode = "captureEvents(); ret.subscribe";
+            return;
+          }
         }
+        diag.lastErr = (e2 && e2.message) ? e2.message : String(e2);
       }
+
+      // If priming worked but we couldn't attach, at least record it
+      diag.captureMode = "captureEvents() (primed, no hook)";
       return;
     } catch (e) {
       diag.lastErr = (e && e.message) ? e.message : String(e);
     }
 
-    // Last resort: listen for window events (some builds dispatch DOM events)
+    // ---- Strategy C: last resort DOM event listener ----
     try {
       window.addEventListener("capture", (ev) => cb(ev, ev && ev.detail));
       diag.captureMode = "window.addEventListener(capture)";
