@@ -1,16 +1,20 @@
 // matcher.js
+// Clean, minimal, OpenGL-safe matcher + capture
 
-function toImageData(maybe) {
-  if (!maybe) return null;
+function toImageData(cap) {
+  if (!cap) return null;
 
-  // ImageData-like already
-  if (maybe.data && typeof maybe.width === "number" && typeof maybe.height === "number") {
-    return maybe;
-  }
+  // Already ImageData
+  if (cap.data && cap.width && cap.height) return cap;
 
-  // Alt1 capture-handle conversions (varies by build)
-  try { if (typeof maybe.toData === "function") return maybe.toData(); } catch {}
-  try { if (typeof maybe.toImageData === "function") return maybe.toImageData(); } catch {}
+  // Alt1 capture handle
+  try {
+    if (typeof cap.toData === "function") return cap.toData();
+  } catch {}
+
+  try {
+    if (typeof cap.toImageData === "function") return cap.toImageData();
+  } catch {}
 
   return null;
 }
@@ -19,44 +23,20 @@ export function captureRs() {
   if (!window.alt1) return null;
   if (!alt1.permissionPixel) return null;
 
-  const w = Number.isFinite(alt1.rsWidth) ? alt1.rsWidth : 0;
-  const h = Number.isFinite(alt1.rsHeight) ? alt1.rsHeight : 0;
+  const w = alt1.rsWidth;
+  const h = alt1.rsHeight;
   if (!w || !h) return null;
 
-  const sx = Number.isFinite(alt1.rsX) ? alt1.rsX : 0;
-  const sy = Number.isFinite(alt1.rsY) ? alt1.rsY : 0;
-
-  // 1) Try SCREEN coordinates (some Alt1 builds expect absolute screen coords)
+  // OpenGL capture uses client-relative coords
   try {
-    if (typeof alt1.captureHold === "function") {
-      const out = alt1.captureHold(sx, sy, w, h);
-      const img = toImageData(out);
-      if (img) return img;
-    }
-    if (typeof alt1.capture === "function") {
-      const out = alt1.capture(sx, sy, w, h);
-      const img = toImageData(out);
-      if (img) return img;
-    }
-  } catch {}
-
-  // 2) Try CLIENT-relative coordinates (0,0 at the RS client area)
-  try {
-    if (typeof alt1.captureHold === "function") {
-      const out = alt1.captureHold(0, 0, w, h);
-      const img = toImageData(out);
-      if (img) return img;
-    }
-    if (typeof alt1.capture === "function") {
-      const out = alt1.capture(0, 0, w, h);
-      const img = toImageData(out);
-      if (img) return img;
-    }
-  } catch {}
+    const cap = alt1.capture(0, 0, w, h);
+    const img = toImageData(cap);
+    if (img) return img;
+  } catch (e) {
+    console.error("capture failed", e);
+  }
 
   return null;
-}
-
 }
 
 export async function loadImage(url) {
@@ -64,9 +44,9 @@ export async function loadImage(url) {
   img.crossOrigin = "anonymous";
   img.src = url;
 
-  await new Promise((resolve, reject) => {
-    img.onload = resolve;
-    img.onerror = reject;
+  await new Promise((res, rej) => {
+    img.onload = res;
+    img.onerror = rej;
   });
 
   const c = document.createElement("canvas");
@@ -77,50 +57,47 @@ export async function loadImage(url) {
   return ctx.getImageData(0, 0, c.width, c.height);
 }
 
-// Luma-based template match with options and returnBest support
 export function findAnchor(hay, needle, opts = {}) {
+  if (!hay || !needle) return null;
+
   const tolerance = opts.tolerance ?? 65;
   const stride = opts.stride ?? 1;
-  const minScore = opts.minScore ?? 0.50;
+  const minScore = opts.minScore ?? 0.5;
   const returnBest = !!opts.returnBest;
-
-  if (!hay || !needle) return null;
 
   const hw = hay.width, hh = hay.height;
   const nw = needle.width, nh = needle.height;
-  if (nw <= 0 || nh <= 0 || nw > hw || nh > hh) return returnBest ? { ok: false, score: 0, best: null } : null;
+  if (nw > hw || nh > hh) {
+    return returnBest ? { ok: false, score: 0, best: null } : null;
+  }
 
-  const hdata = hay.data;
-  const ndata = needle.data;
+  const h = hay.data;
+  const n = needle.data;
 
   // Precompute needle luminance
   const nLum = new Uint8Array(nw * nh);
   for (let j = 0; j < nh; j++) {
     for (let i = 0; i < nw; i++) {
       const idx = (j * nw + i) * 4;
-      const r = ndata[idx], g = ndata[idx + 1], b = ndata[idx + 2];
-      nLum[j * nw + i] = (r * 30 + g * 59 + b * 11) / 100;
+      nLum[j * nw + i] = (n[idx] * 30 + n[idx+1] * 59 + n[idx+2] * 11) / 100;
     }
   }
 
-  const total = nw * nh;
   let bestScore = -1;
   let best = null;
+  const total = nw * nh;
 
   for (let y = 0; y <= hh - nh; y += stride) {
     for (let x = 0; x <= hw - nw; x += stride) {
       let good = 0;
 
       for (let j = 0; j < nh; j++) {
-        const hy = y + j;
         for (let i = 0; i < nw; i++) {
-          const hx = x + i;
-          const hIdx = (hy * hw + hx) * 4;
-          const r = hdata[hIdx], g = hdata[hIdx + 1], b = hdata[hIdx + 2];
-          const hL = (r * 30 + g * 59 + b * 11) / 100;
-
-          const d = Math.abs(hL - nLum[j * nw + i]);
-          if (d <= tolerance) good++;
+          const hi = ((y + j) * hw + (x + i)) * 4;
+          const lum = (h[hi] * 30 + h[hi+1] * 59 + h[hi+2] * 11) / 100;
+          if (Math.abs(lum - nLum[j * nw + i]) <= tolerance) {
+            good++;
+          }
         }
       }
 
@@ -139,5 +116,7 @@ export function findAnchor(hay, needle, opts = {}) {
     }
   }
 
-  return returnBest ? { ok: false, score: bestScore, best } : null;
+  return returnBest
+    ? { ok: false, score: bestScore, best }
+    : null;
 }
