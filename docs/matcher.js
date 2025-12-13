@@ -28,39 +28,25 @@ export function captureRs() {
   if (!window.alt1) return null;
   if (!alt1.permissionPixel) return null;
 
-  // Some APIs expect viewport coords, others capture full RS.
-  const x = alt1.rsX || 0;
-  const y = alt1.rsY || 0;
-  const w = alt1.rsWidth || 0;
-  const h = alt1.rsHeight || 0;
+  const x = alt1.rsX ?? 0;
+  const y = alt1.rsY ?? 0;
+  const w = alt1.rsWidth;
+  const h = alt1.rsHeight;
 
-  const attempts = [];
+  if (!w || !h) return null;
 
-  // Full RS capture variants (different Alt1 versions expose different names)
-  if (typeof alt1.captureHoldFullRs === "function") attempts.push(() => alt1.captureHoldFullRs());
-  if (typeof alt1.captureHoldFull === "function")   attempts.push(() => alt1.captureHoldFull());
-  if (typeof alt1.captureFullRs === "function")     attempts.push(() => alt1.captureFullRs());
-  if (typeof alt1.captureFull === "function")       attempts.push(() => alt1.captureFull());
-
-  // Region capture variants
-  if (typeof alt1.captureHold === "function" && w && h) attempts.push(() => alt1.captureHold(x, y, w, h));
-  if (typeof alt1.capture === "function" && w && h)     attempts.push(() => alt1.capture(x, y, w, h));
-
-  // As a last resort, try captureHold() with no args (some builds default to RS)
-  if (typeof alt1.captureHold === "function") attempts.push(() => alt1.captureHold());
-
-  for (const fn of attempts) {
-    try {
-      const out = fn();
-      const img = toImageData(out);
-      if (img && img.width && img.height) return img;
-    } catch {
-      // keep trying
+  try {
+    const img = alt1.capture(x, y, w, h);
+    if (img && img.width && img.height) {
+      return img;
     }
+  } catch (e) {
+    console.error("capture failed", e);
   }
 
   return null;
 }
+
 
 export async function loadImage(url) {
   const img = new Image();
