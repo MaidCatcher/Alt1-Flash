@@ -1,4 +1,11 @@
-// matcher.js (Alt1 classic script) — captureEvents integration + diagnostics
+// matcher.js — classic script, Alt1-compatible
+// Exposes globals:
+//   window.progflashCaptureRs
+//   window.progflashLoadImage
+//   window.progflashFindAnchor
+// Also exposes diagnostics:
+//   window.progflashCaptureDiag
+
 (function () {
   const diag = {
     captureMode: "",
@@ -6,19 +13,22 @@
     cbCount: 0,
     argSample: "",
     hasFrame: false,
+    retSummary: ""
   };
 
-  let started = false;
   let lastFrame = null;
+  let started = false;
 
-  function summarizeArg(a) {
-    if (a == null) return String(a);
-    const t = typeof a;
-    if (t === "string" || t === "number" || t === "boolean") return `${t}:${a}`;
-    if (Array.isArray(a)) return `array(len=${a.length})`;
-    if (a.data && a.width && a.height) return `ImageDataLike(${a.width}x${a.height})`;
-    const keys = Object.keys(a).slice(0, 12);
-    return `${t} keys=[${keys.join(",")}]`;
+  function summarize(obj) {
+    try {
+      if (!obj) return String(obj);
+      const t = typeof obj;
+      if (t !== "object" && t !== "function") return `${t}:${String(obj)}`;
+      const keys = Object.keys(obj).slice(0, 20);
+      return `${t} keys=[${keys.join(",")}]`;
+    } catch {
+      return "unprintable";
+    }
   }
 
   function tryExtractFrameFromArgs(args) {
@@ -33,28 +43,35 @@
       if (a.img && a.img.data && a.img.width) return a.img;
       if (a.frame && a.frame.data && a.frame.width) return a.frame;
 
-      // Some implementations pass (type, payload)
+      // Nested candidates
       if (typeof a === "object") {
         for (const k of ["data", "image", "capture", "payload", "detail"]) {
           const v = a[k];
           if (v && v.data && v.width && v.height) return v;
         }
       }
+
+      // Conversion helpers
+      if (typeof a.toImageData === "function") {
+        const img = a.toImageData();
+        if (img && img.data && img.width && img.height) return img;
+      }
+      if (typeof a.toData === "function") {
+        const img = a.toData();
+        if (img && img.data && img.width && img.height) return img;
+      }
     }
     return null;
   }
 
-  // NEW: explicitly enable capture on builds where captureEvents won't fire until this is set
+  // Enable capture on builds where captureEvents won't fire until these are set
   function enableAlt1Capture() {
     if (!window.alt1) return;
-
     try {
       // captureMethod is a STRING on your build (ex: "OpenGL")
       if (typeof alt1.captureMethod === "string") {
-        if (!alt1.captureMethod) alt1.captureMethod = "OpenGL";
-        // Keep whatever it is, but if it's empty, force OpenGL
-      } else if (alt1.captureMethod == null) {
-        // In case some builds allow setting it even if it wasn't present
+        alt1.captureMethod = alt1.captureMethod || "OpenGL";
+      } else {
         alt1.captureMethod = "OpenGL";
       }
     } catch (e) {
@@ -64,9 +81,8 @@
     try {
       // captureInterval is a NUMBER on your build
       if (typeof alt1.captureInterval === "number") {
-        // Set it even if already set; this is the "arming" signal on some builds
         alt1.captureInterval = Math.max(50, alt1.captureInterval || 100);
-      } else if (alt1.captureInterval == null) {
+      } else {
         alt1.captureInterval = 100;
       }
     } catch (e) {
@@ -91,7 +107,7 @@
         const args = Array.from(arguments);
 
         if (!diag.argSample) {
-          diag.argSample = args.map(summarizeArg).join(" | ");
+          diag.argSample = args.map(a => summarize(a)).join(" | ");
         }
 
         const frame = tryExtractFrameFromArgs(args);
@@ -104,58 +120,69 @@
       }
     };
 
-    // ---- Strategy A: subscribe directly (what you already tried) ----
+    // Prime call (some builds require this)
+    let ret = null;
     try {
-      window.captureEvents(cb);
-      diag.captureMode = "captureEvents(cb)";
-      return;
+      ret = window.captureEvents();
+      diag.retSummary = summarize(ret);
     } catch (e) {
-      diag.lastErr = (e && e.message) ? e.message : String(e);
+      // ignore, still try other patterns
     }
 
-    // ---- Strategy B (NEW): "start" captureEvents first, then subscribe ----
-    // Some native implementations require a priming call before callbacks fire.
+    // Attach to returned object if it has a subscription API
     try {
-      const ret0 = window.captureEvents(); // prime/start
-      // Try again with callback after priming
-      try {
-        window.captureEvents(cb);
-        diag.captureMode = "captureEvents(); captureEvents(cb)";
-        return;
-      } catch (e2) {
-        // If callback form isn't accepted, try attaching to returned object
-        if (ret0) {
-          if (typeof ret0.on === "function") {
-            ret0.on("capture", cb);
-            diag.captureMode = "captureEvents(); ret.on(capture)";
-            return;
-          } else if (typeof ret0.addEventListener === "function") {
-            ret0.addEventListener("capture", cb);
-            diag.captureMode = "captureEvents(); ret.addEventListener(capture)";
-            return;
-          } else if (typeof ret0.subscribe === "function") {
-            ret0.subscribe(cb);
-            diag.captureMode = "captureEvents(); ret.subscribe";
-            return;
-          }
-        }
-        diag.lastErr = (e2 && e2.message) ? e2.message : String(e2);
+      if (ret && typeof ret.on === "function") {
+        ret.on("capture", cb);
+        diag.captureMode += (diag.captureMode ? " + " : "") + "ret.on('capture')";
       }
-
-      // If priming worked but we couldn't attach, at least record it
-      diag.captureMode = "captureEvents() (primed, no hook)";
-      return;
+      if (ret && typeof ret.addEventListener === "function") {
+        ret.addEventListener("capture", cb);
+        diag.captureMode += (diag.captureMode ? " + " : "") + "ret.addEventListener('capture')";
+      }
+      if (ret && typeof ret.subscribe === "function") {
+        ret.subscribe(cb);
+        diag.captureMode += (diag.captureMode ? " + " : "") + "ret.subscribe(cb)";
+      }
     } catch (e) {
       diag.lastErr = (e && e.message) ? e.message : String(e);
     }
 
-    // ---- Strategy C: last resort DOM event listener ----
-    try {
-      window.addEventListener("capture", (ev) => cb(ev, ev && ev.detail));
-      diag.captureMode = "window.addEventListener(capture)";
-    } catch (e) {
-      diag.lastErr = (e && e.message) ? e.message : String(e);
+    // Try common call signatures (varargs native; may accept extra args)
+    const patterns = [
+      ["captureEvents(cb)", () => window.captureEvents(cb)],
+      ["captureEvents('capture',cb)", () => window.captureEvents("capture", cb)],
+      ["captureEvents('rs',cb)", () => window.captureEvents("rs", cb)],
+      ["captureEvents({type:'capture'},cb)", () => window.captureEvents({ type: "capture" }, cb)]
+    ];
+
+    for (const [name, fn] of patterns) {
+      try {
+        fn();
+        diag.captureMode += (diag.captureMode ? " + " : "") + name;
+      } catch (e) {
+        // swallow, keep trying
+        if (!diag.lastErr) diag.lastErr = (e && e.message) ? e.message : String(e);
+      }
     }
+
+    // DOM event fallback (sometimes native dispatches events)
+    const evNames = ["capture", "Capture", "captureevent", "captureEvent", "frame", "rsCapture"];
+    for (const ev of evNames) {
+      try {
+        window.addEventListener(ev, (e) => cb(e, e && e.detail));
+        diag.captureMode += (diag.captureMode ? " + " : "") + `window.on('${ev}')`;
+      } catch {}
+    }
+
+    // Re-arm interval after hooks are attached (some builds need this)
+    enableAlt1Capture();
+
+    // If nothing arrives quickly, keep a helpful hint in lastErr
+    setTimeout(() => {
+      if (diag.cbCount === 0 && !diag.lastErr) {
+        diag.lastErr = "captureEvents subscribed but no callbacks. Check Alt1: Linked windows (RuneScape ticked) + View Screen enabled + correct capture mode.";
+      }
+    }, 1200);
   }
 
   function progflashCaptureRs() {
@@ -180,7 +207,7 @@
     });
   }
 
-  // Luma-based match (more robust than using only red channel)
+  // Luma-based match
   function progflashFindAnchor(hay, needle, opts = {}) {
     if (!hay || !needle) return null;
 
@@ -196,7 +223,6 @@
     const h = hay.data;
     const n = needle.data;
 
-    // precompute needle luminance
     const nLum = new Uint8Array(nw * nh);
     for (let j = 0; j < nh; j++) {
       for (let i = 0; i < nw; i++) {
@@ -219,7 +245,6 @@
             if (Math.abs(lum - nLum[j * nw + i]) <= tolerance) good++;
           }
         }
-
         const score = good / total;
         if (score > bestScore) {
           bestScore = score;

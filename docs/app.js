@@ -17,7 +17,6 @@ function dbg(v){ dbgEl.textContent = String(v); }
 function rgba(r,g,b,a=255){
   return (r&255)|((g&255)<<8)|((b&255)<<16)|((a&255)<<24);
 }
-
 function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
 
 const APP_V = Date.now();
@@ -74,6 +73,18 @@ function hasMatcherGlobals() {
   );
 }
 
+function diagText() {
+  const d = window.progflashCaptureDiag || {};
+  return (
+    `captureMode: ${d.captureMode || ""}\n` +
+    `cbCount: ${d.cbCount ?? ""}\n` +
+    `hasFrame: ${d.hasFrame ?? ""}\n` +
+    (d.retSummary ? `retSummary: ${d.retSummary}\n` : "") +
+    (d.argSample ? `argSample: ${d.argSample}\n` : "") +
+    (d.lastErr ? `lastErr: ${d.lastErr}\n` : "")
+  );
+}
+
 async function start() {
   if (!window.alt1) { alert("Open this inside Alt1."); return; }
 
@@ -83,13 +94,12 @@ async function start() {
       `ProgFlash v=${APP_V}\n` +
       `alt1: ${!!window.alt1}\n` +
       `overlay: ${alt1.permissionOverlay}\n` +
-      `capture: ${alt1.permissionPixel}\n` +
-      `\nEnable 'View screen' + 'Show overlay' in Alt1.`
+      `capture: ${alt1.permissionPixel}\n\n` +
+      `Enable 'View screen' + 'Show overlay' in Alt1.`
     );
     return;
   }
 
-  // ✅ FIX: check the correct matcher globals
   if (!hasMatcherGlobals()) {
     setStatus("matcher.js not loaded");
     dbg(
@@ -117,27 +127,24 @@ async function start() {
 
   if (loop) clearInterval(loop);
 
-  // (Optional but helpful): tick immediately
-  // so you don’t miss the bar right after clicking Start.
   const tick = () => {
     if (!running) return;
 
     const img = window.progflashCaptureRs();
 
+    const capKeys = window.alt1
+      ? Object.keys(alt1).filter(k => k.toLowerCase().includes("capture")).sort().join(",")
+      : "n/a";
+
     if (!img) {
-      const capKeys = window.alt1
-        ? Object.keys(alt1).filter(k => k.toLowerCase().includes("capture")).sort().join(",")
-        : "n/a";
-
-      const nativeCE = typeof window.captureEvents;
-
       dbg(
         `ProgFlash v=${APP_V}\n` +
         `anchor=${anchor.width}x${anchor.height}\n` +
         `rsX=${alt1.rsX} rsY=${alt1.rsY}\n` +
         `rsW=${alt1.rsWidth} rsH=${alt1.rsHeight}\n` +
-        `native captureEvents: ${nativeCE}\n` +
+        `native captureEvents: ${typeof window.captureEvents}\n` +
         `alt1 capture keys: ${capKeys}\n` +
+        diagText() +
         `captureRs(): null (capture failed)`
       );
       return;
@@ -156,7 +163,8 @@ async function start() {
       `img=${img.width}x${img.height}\n` +
       `anchor=${anchor.width}x${anchor.height}\n` +
       `best score=${scoreTxt}\n` +
-      `ok=${!!(res && res.ok)}`
+      `ok=${!!(res && res.ok)}\n` +
+      diagText()
     );
 
     if (res && res.best && alt1.permissionOverlay) {
@@ -195,8 +203,6 @@ function stop() {
   if (loop) clearInterval(loop);
   loop = null;
 
-  // ✅ FIX: remove alt1.captureInterval(...) call (it is not a function on your build)
-
   startBtn.disabled = false;
   stopBtn.disabled = true;
 
@@ -226,7 +232,7 @@ setStatus("Idle");
 setMode("Not running");
 setLock("none");
 
-// ✅ FIX: if matcher loads after app.js, clear the stale error
+// If matcher loads after app.js, clear the stale error
 (function waitForMatcher() {
   if (hasMatcherGlobals()) {
     if (statusEl && statusEl.textContent.includes("matcher.js")) {
