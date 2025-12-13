@@ -1,13 +1,13 @@
 // matcher.js
-// Clean, minimal, OpenGL-safe matcher + capture
+// Alt1-compatible (NO ES modules)
+
+/* ================= CAPTURE ================= */
 
 function toImageData(cap) {
   if (!cap) return null;
 
-  // Already ImageData
   if (cap.data && cap.width && cap.height) return cap;
 
-  // Alt1 capture handle
   try {
     if (typeof cap.toData === "function") return cap.toData();
   } catch {}
@@ -19,51 +19,53 @@ function toImageData(cap) {
   return null;
 }
 
-export function captureRs() {
+function captureRs() {
   if (!window.alt1) return null;
   if (!alt1.permissionPixel) return null;
 
-  const w = alt1.rsWidth;
-  const h = alt1.rsHeight;
   const x = alt1.rsX;
   const y = alt1.rsY;
+  const w = alt1.rsWidth;
+  const h = alt1.rsHeight;
 
   if (!w || !h) return null;
 
   try {
-    // New Alt1 capture API (this is what YOUR build uses)
+    // NEW Alt1 API (your build)
     const cap = alt1.captureMethod(x, y, w, h);
-    if (!cap) return null;
+    const img = toImageData(cap);
+    if (img) return img;
+  } catch (e) {
+    console.error("captureMethod failed", e);
+  }
 
-    // Some builds return ImageData directly
-    if (cap.data && cap.width && cap.height) {
-      return cap;
-    }
-
-    // Others return a handle that must be converted
-    if (typeof cap.toData === "function") {
-      const img = cap.toDat
-
-
-export async function loadImage(url) {
-  const img = new Image();
-  img.crossOrigin = "anonymous";
-  img.src = url;
-
-  await new Promise((res, rej) => {
-    img.onload = res;
-    img.onerror = rej;
-  });
-
-  const c = document.createElement("canvas");
-  c.width = img.naturalWidth;
-  c.height = img.naturalHeight;
-  const ctx = c.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(img, 0, 0);
-  return ctx.getImageData(0, 0, c.width, c.height);
+  return null;
 }
 
-export function findAnchor(hay, needle, opts = {}) {
+/* ================= IMAGE LOAD ================= */
+
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.src = url;
+
+    img.onload = () => {
+      const c = document.createElement("canvas");
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      const ctx = c.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0);
+      resolve(ctx.getImageData(0, 0, c.width, c.height));
+    };
+
+    img.onerror = reject;
+  });
+}
+
+/* ================= MATCHER ================= */
+
+function findAnchor(hay, needle, opts = {}) {
   if (!hay || !needle) return null;
 
   const tolerance = opts.tolerance ?? 65;
@@ -85,7 +87,8 @@ export function findAnchor(hay, needle, opts = {}) {
   for (let j = 0; j < nh; j++) {
     for (let i = 0; i < nw; i++) {
       const idx = (j * nw + i) * 4;
-      nLum[j * nw + i] = (n[idx] * 30 + n[idx+1] * 59 + n[idx+2] * 11) / 100;
+      nLum[j * nw + i] =
+        (n[idx] * 30 + n[idx + 1] * 59 + n[idx + 2] * 11) / 100;
     }
   }
 
@@ -100,7 +103,9 @@ export function findAnchor(hay, needle, opts = {}) {
       for (let j = 0; j < nh; j++) {
         for (let i = 0; i < nw; i++) {
           const hi = ((y + j) * hw + (x + i)) * 4;
-          const lum = (h[hi] * 30 + h[hi+1] * 59 + h[hi+2] * 11) / 100;
+          const lum =
+            (h[hi] * 30 + h[hi + 1] * 59 + h[hi + 2] * 11) / 100;
+
           if (Math.abs(lum - nLum[j * nw + i]) <= tolerance) {
             good++;
           }
@@ -126,3 +131,9 @@ export function findAnchor(hay, needle, opts = {}) {
     ? { ok: false, score: bestScore, best }
     : null;
 }
+
+/* ================= EXPOSE TO WINDOW ================= */
+
+window.captureRs = captureRs;
+window.loadImage = loadImage;
+window.findAnchor = findAnchor;
