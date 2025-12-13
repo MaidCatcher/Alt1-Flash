@@ -1,100 +1,155 @@
-export const MATCHER_VERSION = Date.now();
-
-// Minimal, robust template matcher for Alt1.
-// - Works on luminance (grayscale) for resilience against minor color shifts.
-// - Supports options: tolerance, stride, minScore, returnBest
-// Returns:
-//   - if returnBest=false: null or {x,y,w,h,score,ok}
-//   - if returnBest=true: always returns best candidate {x,y,w,h,score,ok}
+// matcher.js — browser-only, Alt1-safe
+//
+// Provides:
+//  - captureRs(): capture an ImageData from Alt1 (robust across Alt1 versions)
+//  - loadImage(url): load an image asset (cache-busted)
+//  - findAnchor(haystack, needleImg, opts): template match with optional best-score debug
 
 export function captureRs() {
-  if (!window.alt1 || !alt1.permissionPixel) return null;
-  // Alt1 returns ImageData
-  return alt1.captureHoldFullRs();
+  if (!window.alt1) return null;
+
+  // Some Alt1 builds expose different capture functions. We try the common ones safely.
+  const fns = [
+    "captureHoldFullRs",
+    "captureHoldRs",
+    "captureHold",
+    "captureFullRs",
+    "captureRs",
+    "capture"
+  ];
+
+  for (const name of fns) {
+    try {
+      const fn = alt1 && alt1[name];
+      if (typeof fn === "function") {
+        const img = fn.call(alt1);
+        if (img && typeof img.width === "number" && typeof img.height === "number" && img.data) return img;
+      }
+    } catch (e) {
+      // ignore and try the next function
+    }
+  }
+
+  return null;
 }
 
-export async function loadImage(url) {
+export function loadImage(url) {
   return new Promise((resolve, reject) => {
     const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => {
-      const c = document.createElement("canvas");
-      c.width = img.width;
-      c.height = img.height;
-      const ctx = c.getContext("2d", { willReadFrequently: true });
-      ctx.drawImage(img, 0, 0);
-      const data = ctx.getImageData(0, 0, img.width, img.height);
-      resolve(data);
-    };
-    img.onerror = reject;
-    img.src = url;
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("Failed to load image: " + url));
+    img.src = url + "?v=" + 1765636596943; // stable cache-bust per build
   });
 }
 
-function lum(r,g,b){
-  // integer approx of Rec.709
-  return (r*2126 + g*7152 + b*722) / 10000;
-}
+/**
+ * findAnchor(haystack, needleImg, opts)
+ *
+ * opts:
+ *  - tolerance: per-channel abs tolerance (default 18)
+ *  - stride: sample every N pixels in needle (default 1)
+ *  - step: scan step in haystack (default 1)
+ *  - minScore: accept match if score >= minScore (default 0.50)
+ *  - returnBest: if true, return best match even if not passed
+ *
+ * returns:
+ *  - null (if inputs invalid)
+ *  - if returnBest false: { x,y,w,h,score,passed:true } or null
+ *  - if returnBest true: { x,y,w,h,score,passed } with best location always included
+ */
+export function findAnchor(haystack, needleImg, opts = {}) {
+  if (!haystack || !haystack.data || !needleImg) return null;
 
-function buildLum(imgData){
-  const { data, width, height } = imgData;
-  const out = new Float32Array(width * height);
-  for (let i=0, p=0; i<data.length; i+=4, p++){
-    out[p] = lum(data[i], data[i+1], data[i+2]);
-  }
-  return out;
-}
+  const cw = haystack.width;
+  const ch = haystack.height;
 
-export function findAnchor(img, anchor, opts = {}) {
-  const tolerance = opts.tolerance ?? 70;     // higher = more forgiving
-  const stride    = opts.stride ?? 1;         // 1 for small anchors
-  const minScore  = opts.minScore ?? 0.52;    // typical for small anchor
+  const tolerance = typeof opts.tolerance === "number" ? opts.tolerance : 18;
+  const stride = typeof opts.stride === "number" ? Math.max(1, opts.stride) : 1;
+  const step = typeof opts.step === "number" ? Math.max(1, opts.step) : 1;
+  const minScore = typeof opts.minScore === "number" ? opts.minScore : 0.50;
   const returnBest = !!opts.returnBest;
 
-  if (!img || !anchor) return returnBest ? { x:0,y:0,w:0,h:0,score:0,ok:false } : null;
+  // Render needle image to ImageData
+  const nc = document.createElement("canvas");
+  nc.width = needleImg.width;
+  nc.height = needleImg.height;
+  const nctx = nc.getContext("2d", { willReadFrequently: true });
+  nctx.drawImage(needleImg, 0, 0);
+  const needle = nctx.getImageData(0, 0, nc.width, nc.height).data;
 
-  const iw = img.width, ih = img.height;
-  const aw = anchor.width, ah = anchor.height;
-  if (aw <= 0 || ah <= 0 || aw > iw || ah > ih) {
-    return returnBest ? { x:0,y:0,w:aw,h:ah,score:0,ok:false } : null;
-  }
+  const nw = nc.width;
+  const nh = nc.height;
 
-  // Precompute luminance arrays (fast enough for these sizes)
-  const iLum = buildLum(img);
-  const aLum = buildLum(anchor);
+  if (nw <= 0 || nh <= 0 || nw > cw || nh > ch) return null;
 
-  // Convert tolerance (0..255-ish) to per-pixel acceptance.
-  // We score pixels as "match" if abs diff <= tolerance.
-  const tol = Math.max(1, tolerance);
+  // Build sample coordinates for the needle
+  const xs = [];
+  for (let x = 0; x < nw; x += stride) xs.push(x);
+  const ys = [];
+  for (let y = 0; y < nh; y += stride) ys.push(y);
+
+  const total = xs.length * ys.length;
+  if (total <= 0) return null;
 
   let bestScore = -1;
   let bestX = 0, bestY = 0;
 
-  const total = aw * ah;
+  const h = haystack.data;
 
-  for (let y = 0; y <= ih - ah; y += stride) {
-    const rowBase = y * iw;
-    for (let x = 0; x <= iw - aw; x += stride) {
-      let good = 0;
-      // Compare anchor
-      for (let ay=0; ay<ah; ay++) {
-        let iIdx = (rowBase + x) + ay * iw;
-        let aIdx = ay * aw;
-        for (let ax=0; ax<aw; ax++) {
-          const d = Math.abs(iLum[iIdx + ax] - aLum[aIdx + ax]);
-          if (d <= tol) good++;
+  for (let y = 0; y <= ch - nh; y += step) {
+    for (let x = 0; x <= cw - nw; x += step) {
+      let matched = 0;
+
+      for (let yi = 0; yi < ys.length; yi++) {
+        const ny = ys[yi];
+        const hayRow = ((y + ny) * cw + x) * 4;
+        const nedRow = (ny * nw) * 4;
+
+        for (let xi = 0; xi < xs.length; xi++) {
+          const nx = xs[xi];
+          const hi = hayRow + nx * 4;
+          const ni = nedRow + nx * 4;
+
+          if (
+            Math.abs(h[hi]     - needle[ni])     <= tolerance &&
+            Math.abs(h[hi + 1] - needle[ni + 1]) <= tolerance &&
+            Math.abs(h[hi + 2] - needle[ni + 2]) <= tolerance
+          ) {
+            matched++;
+          }
         }
       }
-      const score = good / total;
+
+      const score = matched / total;
       if (score > bestScore) {
         bestScore = score;
-        bestX = x; bestY = y;
+        bestX = x;
+        bestY = y;
+      }
+
+      if (score >= minScore) {
+        return {
+          x,
+          y,
+          w: nw,
+          h: nh,
+          score,
+          passed: true,
+          best: { x, y, w: nw, h: nh }
+        };
       }
     }
   }
 
-  const ok = bestScore >= minScore;
-  const result = { x: bestX, y: bestY, w: aw, h: ah, score: bestScore, ok };
+  if (!returnBest) return null;
 
-  return ok ? result : (returnBest ? result : null);
+  return {
+    x: bestX,
+    y: bestY,
+    w: nw,
+    h: nh,
+    score: bestScore < 0 ? 0 : bestScore,
+    passed: false,
+    best: { x: bestX, y: bestY, w: nw, h: nh }
+  };
 }

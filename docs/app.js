@@ -1,6 +1,4 @@
-import { captureRs, loadImage, findAnchor, MATCHER_VERSION } from "./matcher.js";
-
-const APP_VERSION = Date.now();
+import { captureRs, loadImage, findAnchor } from "./matcher.js";
 
 const statusEl = document.getElementById("status");
 const modeEl   = document.getElementById("mode");
@@ -11,6 +9,8 @@ const startBtn = document.getElementById("startBtn");
 const stopBtn  = document.getElementById("stopBtn");
 const testBtn  = document.getElementById("testFlashBtn");
 
+const BUILD = 1765636596943;
+
 function setStatus(v){ statusEl.textContent = v; }
 function setMode(v){ modeEl.textContent = v; }
 function setLock(v){ lockEl.textContent = v; }
@@ -20,10 +20,17 @@ function rgba(r,g,b,a=255){
   return (r&255)|((g&255)<<8)|((b&255)<<16)|((a&255)<<24);
 }
 
-/* ================= FLASH (safe, finite) ================= */
+function clearDebugOverlay() {
+  if (!window.alt1 || !alt1.permissionOverlay) return;
+  alt1.overLaySetGroup("progflash_debug");
+  alt1.overLayClearGroup("progflash_debug");
+}
+
+// ----- Flash (safe, finite, non-overlapping) -----
 let flashing = false;
 let lastFlashAt = 0;
 const FLASH_COOLDOWN_MS = 1500;
+
 function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
 
 async function flashOverlay({ cycles = 3, intervalMs = 300 } = {}) {
@@ -54,7 +61,7 @@ async function flashOverlay({ cycles = 3, intervalMs = 300 } = {}) {
   }
 }
 
-/* ================= Capture helpers ================= */
+// ----- Capture normalization to RS viewport -----
 function captureRsViewport() {
   const full = captureRs();
   if (!full) return null;
@@ -64,14 +71,9 @@ function captureRsViewport() {
   const x = alt1.rsX || 0;
   const y = alt1.rsY || 0;
 
-  // If it already matches viewport, use it
-  if (w && h && full.width === w && full.height === h && x === 0 && y === 0) {
-    return full;
-  }
-  // If viewport dims missing, fall back
+  if (w && h && full.width === w && full.height === h && x === 0 && y === 0) return full;
   if (!w || !h) return full;
 
-  // Normalize using canvas
   const c = document.createElement("canvas");
   c.width = w;
   c.height = h;
@@ -85,72 +87,49 @@ function captureRsViewport() {
   }
 }
 
-function clearGroup(group){
-  if (!window.alt1 || !alt1.permissionOverlay) return;
-  alt1.overLaySetGroup(group);
-  alt1.overLayClearGroup(group);
-}
-
-/* ================= State ================= */
 let running = false;
-let loop = null;
-
 let anchor = null;
-let lastSeen = 0;
+let loop = null;
 let tries = 0;
 let hits = 0;
 
-function setUiStateIdle(){
-  setStatus("Idle");
-  setMode("Not running");
-  setLock("none");
-  startBtn.disabled = false;
-  stopBtn.disabled = true;
-}
-function setUiStateRunning(){
-  setStatus("Searching…");
-  setMode("Running");
-  setLock("none");
-  startBtn.disabled = true;
-  stopBtn.disabled = false;
-}
-
-/* ================= Main ================= */
 async function start() {
   if (!window.alt1) { alert("Open this inside Alt1."); return; }
 
   if (!alt1.permissionPixel || !alt1.permissionOverlay) {
     setStatus("Missing permissions");
     dbg(
-      `ProgFlash v=${APP_VERSION}\n` +
-      `Matcher v=${MATCHER_VERSION}\n` +
-      `alt1: ${!!window.alt1}\noverlay: ${alt1.permissionOverlay}\ncapture: ${alt1.permissionPixel}\n\n` +
-      `Enable 'View screen' and 'Show overlay' permissions for this app.`
+      `ProgFlash v=${BUILD}\n` +
+      `alt1: ${!!window.alt1}\n` +
+      `overlay: ${alt1.permissionOverlay}\n` +
+      `capture: ${alt1.permissionPixel}\n\n` +
+      "Enable 'View screen' and 'Show overlay' for ProgFlash in Alt1 settings."
     );
     return;
   }
 
   if (!anchor) {
     setStatus("Loading anchor…");
-    // cache-bust anchor too
-    anchor = await loadImage(`./img/progbar_anchor.png?v=${APP_VERSION}`);
+    anchor = await loadImage("./img/progbar_anchor.png");
   }
 
   running = true;
-  setUiStateRunning();
-  clearGroup("progflash_debug");
-  clearGroup("progflash_best");
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+  setMode("Running");
+  setStatus("Searching…");
+  setLock("none");
+  clearDebugOverlay();
 
   tries = 0;
   hits = 0;
-  lastSeen = 0;
 
   if (loop) clearInterval(loop);
 
   loop = setInterval(() => {
     if (!running) return;
 
-    // Permission removed mid-run
+    // If permissions got toggled off while running, stop cleanly.
     if (!alt1.permissionPixel || !alt1.permissionOverlay) {
       stop();
       setStatus("Permissions removed");
@@ -158,89 +137,73 @@ async function start() {
     }
 
     const img = captureRsViewport();
-    tries++;
-
     if (!img) {
       dbg(
-        `ProgFlash v=${APP_VERSION}\n` +
-        `Matcher v=${MATCHER_VERSION}\n` +
-        `Anchor w=${anchor?.width ?? "?"} h=${anchor?.height ?? "?"}\n` +
-        `tries=${tries} hits=${hits}\n` +
-        `CAPTURE FAILED (img=null)\n` +
-        `alt1.rsWidth=${alt1.rsWidth} alt1.rsHeight=${alt1.rsHeight}\n`
+        `ProgFlash v=${BUILD}\n` +
+        `anchor=${anchor ? `${anchor.width}x${anchor.height}` : "n/a"}\n` +
+        "captureRs(): null (capture failed)"
       );
       return;
     }
 
-    // Always compute best score (even if not ok)
-    const best = findAnchor(img, anchor, {
-      tolerance: 70,
+    tries++;
+
+    // Always ask for a best score so we can debug.
+    const hit = findAnchor(img, anchor, {
+      tolerance: 65,
       stride: 1,
-      minScore: 0.52,
+      step: 1,
+      minScore: 0.50,
       returnBest: true
     });
 
-    const bestScore = (best && typeof best.score === "number") ? best.score.toFixed(3) : "n/a";
+    const scoreStr = hit && typeof hit.score === "number" ? hit.score.toFixed(3) : "n/a";
+    dbg(
+      `ProgFlash v=${BUILD}\n` +
+      `img=${img.width}x${img.height}\n` +
+      `anchor=${anchor.width}x${anchor.height}\n` +
+      `tries=${tries} hits=${hits}\n` +
+      `best score=${scoreStr}\n` +
+      `passed=${hit ? hit.passed : false}`
+    );
 
-    // Show best match rectangle when it's somewhat close
-    if (best && best.x != null && best.score >= 0.35 && alt1.permissionOverlay) {
-      alt1.overLaySetGroup("progflash_best");
+    // Draw yellow best-guess box if we have something reasonable.
+    if (hit && hit.best && alt1.permissionOverlay && hit.score >= 0.30) {
+      alt1.overLaySetGroup("progflash_debug");
       alt1.overLayRect(
-        rgba(255, 235, 59, 140), // yellow-ish
-        (alt1.rsX || 0) + best.x,
-        (alt1.rsY || 0) + best.y,
-        best.w,
-        best.h,
+        rgba(255, 255, 0, 140),
+        (alt1.rsX || 0) + hit.best.x,
+        (alt1.rsY || 0) + hit.best.y,
+        hit.best.w,
+        hit.best.h,
         200,
         2
       );
-    } else {
-      clearGroup("progflash_best");
     }
 
-    dbg(
-      `ProgFlash v=${APP_VERSION}\n` +
-      `Matcher v=${MATCHER_VERSION}\n` +
-      `Anchor w=${anchor.width} h=${anchor.height}\n` +
-      `tries=${tries} hits=${hits}\n` +
-      `img=${img.width}x${img.height}\n` +
-      `best score=${bestScore}\n` +
-      (best?.ok ? `LOCK @ ${best.x},${best.y}\n` : `no lock\n`) +
-      `overlay: ${alt1.permissionOverlay}\n` +
-      `capture: ${alt1.permissionPixel}\n`
-    );
-
-    if (best && best.ok) {
+    if (hit && hit.passed) {
       hits++;
-      lastSeen = Date.now();
       setStatus("Locked");
-      setLock(`x=${best.x}, y=${best.y}`);
+      setLock(`x=${hit.x}, y=${hit.y}`);
 
-      // Debug box for actual lock
+      // Blue box where we matched
       if (alt1.permissionOverlay) {
         alt1.overLaySetGroup("progflash_debug");
         alt1.overLayRect(
           rgba(0, 120, 255, 200),
-          (alt1.rsX || 0) + best.x,
-          (alt1.rsY || 0) + best.y,
-          best.w,
-          best.h,
+          (alt1.rsX || 0) + hit.x,
+          (alt1.rsY || 0) + hit.y,
+          hit.w,
+          hit.h,
           300,
           2
         );
       }
-      return;
-    }
-
-    // Lost lock flash (if we had a lock recently)
-    if (lastSeen && Date.now() - lastSeen > 450) {
-      clearGroup("progflash_debug");
-      flashOverlay().catch(console.error);
-      lastSeen = 0;
-      setStatus("Flashed!");
+    } else {
+      setStatus("Searching…");
       setLock("none");
     }
-  }, 200);
+  }, 150);
 }
 
 function stop() {
@@ -248,30 +211,39 @@ function stop() {
   if (loop) clearInterval(loop);
   loop = null;
 
-  setUiStateIdle();
-  clearGroup("progflash_debug");
-  clearGroup("progflash_best");
-  clearGroup("progflash_flash");
-  flashing = false;
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+
+  setMode("Not running");
+  setStatus("Idle");
+  setLock("none");
+  clearDebugOverlay();
 }
 
-/* ================= Buttons ================= */
 testBtn.onclick = () => {
   console.log("TEST BUTTON CLICKED", Date.now());
   setStatus("Test flash");
   flashOverlay().catch(console.error);
 };
 
-startBtn.onclick = () => start().catch(e => { console.error(e); setStatus("Error (see console)"); });
+startBtn.onclick = () => {
+  console.log("START CLICKED", Date.now());
+  start().catch(e => { console.error(e); setStatus("Error (see console)"); });
+};
 
-stopBtn.onclick = () => stop();
+stopBtn.onclick = () => {
+  console.log("STOP CLICKED", Date.now());
+  stop();
+};
 
-/* ================= Init ================= */
-setUiStateIdle();
+// Init
+setStatus("Idle");
+setMode("Not running");
+setLock("none");
+
 dbg(
-  `ProgFlash v=${APP_VERSION}\n` +
-  `Matcher v=${MATCHER_VERSION}\n` +
+  `ProgFlash v=${BUILD}\n` +
   `alt1: ${!!window.alt1}\n` +
   `overlay: ${window.alt1 ? alt1.permissionOverlay : false}\n` +
-  `capture: ${window.alt1 ? alt1.permissionPixel : false}\n`
+  `capture: ${window.alt1 ? alt1.permissionPixel : false}`
 );
