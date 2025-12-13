@@ -4,13 +4,13 @@
   <meta charset="utf-8" />
   <title>ProgFlash</title>
   <style>
-    body {{ font-family: sans-serif; margin: 12px; }}
-    button {{ padding: 8px 10px; margin-right: 8px; }}
-    .row {{ margin: 10px 0; }}
-    .status {{ padding: 8px; background:#f2f2f2; border-radius: 6px; }}
-    pre {{ white-space: pre-wrap; background:#000; color:#00ff00; padding:8px; border-radius: 6px; }}
-    .err {{ white-space: pre-wrap; background:#fee; border:1px solid #f99; padding:8px; border-radius:6px; }}
-    code {{ background:#eee; padding:2px 4px; border-radius:4px; }}
+    body { font-family: sans-serif; margin: 12px; }
+    button { padding: 8px 10px; margin-right: 8px; }
+    .row { margin: 10px 0; }
+    .status { padding: 8px; background:#f2f2f2; border-radius: 6px; }
+    pre { white-space: pre-wrap; background:#000; color:#00ff00; padding:8px; border-radius: 6px; }
+    .err { white-space: pre-wrap; background:#fee; border:1px solid #f99; padding:8px; border-radius:6px; }
+    code { background:#eee; padding:2px 4px; border-radius:4px; }
   </style>
 </head>
 <body>
@@ -37,16 +37,30 @@
   <pre id="debugBox">Loading…</pre>
 
   <script>
-    window.onerror = function(msg, src, line, col){{
+    // Better error surfaces (so we don't get [object Object])
+    window.addEventListener("error", (e) => {
       const pre = document.createElement("pre");
       pre.className = "err";
-      pre.textContent = `JS ERROR: ${{msg}}\n${{src}}:${{line}}:${{col}}`;
+      pre.textContent =
+        "JS ERROR: " + (e.message || String(e.error || e)) + "\n" +
+        (e.filename ? `${e.filename}:${e.lineno}:${e.colno}\n` : "") +
+        (e.error && e.error.stack ? e.error.stack : "");
       document.body.prepend(pre);
-    }};
+    });
+
+    window.addEventListener("unhandledrejection", (e) => {
+      const pre = document.createElement("pre");
+      pre.className = "err";
+      const err = e.reason;
+      pre.textContent =
+        "PROMISE REJECTION: " + (err && err.message ? err.message : String(err)) + "\n" +
+        (err && err.stack ? err.stack : "");
+      document.body.prepend(pre);
+    });
   </script>
 
-  <!-- IMPORTANT: Alt1 generally works best without ES modules. Load matcher first, then app. -->
-  <script src="./matcher.js?v=1765641237"></script>
-  <script src="./app.js?v=1765641237"></script>
+  <!-- IMPORTANT: classic scripts; matcher must load BEFORE app -->
+  <script src="./matcher.js?v=1765637000001"></script>
+  <script src="./app.js?v=1765637000001"></script>
 </body>
 </html>
