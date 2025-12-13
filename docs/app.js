@@ -31,7 +31,7 @@ const FLASH_COOLDOWN_MS = 1500;
 
 function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
 
-async function flashOverlay({ cycles = 8, intervalMs = 220 } = {}) {
+async function flashOverlay({ cycles = 3, intervalMs = 250 } = {}) {
   if (!window.alt1) { alert("Open this inside Alt1."); return; }
 
   if (!alt1.permissionOverlay) {
@@ -39,7 +39,7 @@ async function flashOverlay({ cycles = 8, intervalMs = 220 } = {}) {
     return;
   }
 
-  // Hard cooldown so we never retrigger rapidly (helps a LOT with the DND flicker symptom)
+  // Hard cooldown so we never retrigger rapidly (helps with Focus/DND flicker)
   const now = Date.now();
   if (now - lastFlashAt < FLASH_COOLDOWN_MS) return;
   lastFlashAt = now;
@@ -48,31 +48,29 @@ async function flashOverlay({ cycles = 8, intervalMs = 220 } = {}) {
   if (flashing) return;
   flashing = true;
 
-  const g = "progflash";
+  const g = "progflash_flash";
 
   try {
-    alt1.overLaySetGroup(g);
-
+    // Flash a small overlay element (text) instead of a full-screen rect.
+    // Full-screen rapid redraws are more likely to upset Windows focus/notifications.
     for (let i = 0; i < cycles; i++) {
-      // draw
-      alt1.overLayRect(
-        rgba(255, 0, 0, 160),
-        alt1.rsX || 0,
-        alt1.rsY || 0,
-        alt1.rsWidth || 800,
-        alt1.rsHeight || 600,
-        200,
-        0
+      alt1.overLayClearGroup(g);
+      alt1.overLayTextEx(
+        "PROGFLASH",
+        (typeof alt1.overlayColor === "function" ? alt1.overlayColor(255,0,0,255) : rgba(255,0,0,255)),
+        22,
+        (alt1.rsX || 0) + 30,
+        (alt1.rsY || 0) + 30,
+        2000,
+        g
       );
       await sleep(intervalMs);
 
-      // clear
       alt1.overLayClearGroup(g);
       await sleep(intervalMs);
     }
   } finally {
     // Always leave the overlay group clean
-    alt1.overLaySetGroup(g);
     alt1.overLayClearGroup(g);
     flashing = false;
   }
@@ -233,8 +231,7 @@ function stop() {
 
   // Clean up flash overlay if it was mid-flight.
   if (window.alt1 && alt1.permissionOverlay) {
-    alt1.overLaySetGroup("progflash");
-    alt1.overLayClearGroup("progflash");
+    alt1.overLayClearGroup("progflash_flash");
   }
   flashing = false;
 }
