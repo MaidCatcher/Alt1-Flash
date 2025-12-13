@@ -1,121 +1,126 @@
-// matcher.js — NO modules. Uses Alt1 event-driven capture via window.captureEvents() if available.
-
+// matcher.js (Alt1 classic script) — captureEvents integration + diagnostics
 (function () {
+  const diag = {
+    captureMode: "",
+    lastErr: "",
+    cbCount: 0,
+    argSample: "",
+    hasFrame: false,
+  };
+
+  let started = false;
   let lastFrame = null;
-  let captureStarted = false;
-  let captureMode = "none";
-  let lastCaptureErr = "";
 
-  function toImageData(maybe) {
-    if (!maybe) return null;
-    if (maybe.data && typeof maybe.width === "number" && typeof maybe.height === "number") return maybe;
+  function summarizeArg(a) {
+    if (a == null) return String(a);
+    const t = typeof a;
+    if (t === "string" || t === "number" || t === "boolean") return `${t}:${a}`;
+    if (Array.isArray(a)) return `array(len=${a.length})`;
+    if (a.data && a.width && a.height) return `ImageDataLike(${a.width}x${a.height})`;
+    const keys = Object.keys(a).slice(0, 12);
+    return `${t} keys=[${keys.join(",")}]`;
+  }
 
-    try { if (typeof maybe.toData === "function") return maybe.toData(); } catch {}
-    try { if (typeof maybe.toImageData === "function") return maybe.toImageData(); } catch {}
+  function tryExtractFrameFromArgs(args) {
+    for (const a of args) {
+      if (!a) continue;
 
-    if (maybe.img && maybe.img.data) return maybe.img;
+      // ImageData-like
+      if (a.data && a.width && a.height) return a;
+
+      // Common wrappers
+      if (a.imageData && a.imageData.data && a.imageData.width) return a.imageData;
+      if (a.img && a.img.data && a.img.width) return a.img;
+      if (a.frame && a.frame.data && a.frame.width) return a.frame;
+
+      // Some implementations pass (type, payload)
+      if (typeof a === "object") {
+        for (const k of ["data", "image", "capture", "payload"]) {
+          const v = a[k];
+          if (v && v.data && v.width && v.height) return v;
+        }
+      }
+    }
     return null;
   }
 
-  function hookReturn(ret, cb) {
-    if (!ret) return;
+  function ensureCaptureEventsStarted() {
+    if (started) return;
+    started = true;
 
+    // If captureInterval is a numeric property, set it (enables capture on some builds)
     try {
-      if (typeof ret.on === "function") {
-        ret.on("frame", cb);
-        ret.on("capture", cb);
-        ret.on("data", cb);
-        captureMode += "+ret.on";
-        return;
+      if (window.alt1 && typeof alt1.captureInterval === "number") {
+        alt1.captureInterval = Math.max(50, alt1.captureInterval || 100);
       }
     } catch {}
-
-    try {
-      if (typeof ret.addEventListener === "function") {
-        ret.addEventListener("frame", (e) => cb(e && e.detail ? e.detail : e));
-        ret.addEventListener("capture", (e) => cb(e && e.detail ? e.detail : e));
-        captureMode += "+ret.addEventListener";
-        return;
-      }
-    } catch {}
-
-    try {
-      if (typeof ret.subscribe === "function") {
-        ret.subscribe(cb);
-        captureMode += "+ret.subscribe";
-        return;
-      }
-    } catch {}
-  }
-
-  function startCaptureEvents() {
-    if (captureStarted) return;
-    captureStarted = true;
 
     if (typeof window.captureEvents !== "function") {
-      captureMode = "no-captureEvents";
+      diag.captureMode = "no captureEvents";
       return;
     }
 
-    const cb = function (...args) {
-      // Look for ImageData-like in args
-      for (const a of args) {
-        const img = toImageData(a);
-        if (img) { lastFrame = img; return; }
-      }
-      if (args.length >= 2) {
-        const img = toImageData(args[1]);
-        if (img) { lastFrame = img; return; }
+    const cb = function () {
+      try {
+        diag.cbCount++;
+        const args = Array.from(arguments);
+
+        if (!diag.argSample) {
+          diag.argSample = args.map(summarizeArg).join(" | ");
+        }
+
+        const frame = tryExtractFrameFromArgs(args);
+        if (frame) {
+          lastFrame = frame;
+          diag.hasFrame = true;
+        }
+      } catch (e) {
+        diag.lastErr = (e && e.message) ? e.message : String(e);
       }
     };
 
-    // Try captureEvents(cb)
+    // Try calling captureEvents with a callback
     try {
-      const ret = window.captureEvents(cb);
-      captureMode = "captureEvents(cb)";
-      hookReturn(ret, cb);
+      window.captureEvents(cb);
+      diag.captureMode = "captureEvents(cb)";
       return;
-    } catch (e1) {
-      lastCaptureErr = String(e1 && e1.message ? e1.message : e1);
+    } catch (e) {
+      diag.lastErr = (e && e.message) ? e.message : String(e);
     }
 
-    // Try captureEvents() returning something
+    // Try captureEvents() returning a subscription-like object
     try {
       const ret = window.captureEvents();
-      captureMode = "captureEvents()";
-      hookReturn(ret, cb);
+      diag.captureMode = "captureEvents()";
+      if (ret) {
+        if (typeof ret.on === "function") {
+          ret.on("capture", cb);
+          diag.captureMode = "captureEvents()+ret.on(capture)";
+        } else if (typeof ret.addEventListener === "function") {
+          ret.addEventListener("capture", cb);
+          diag.captureMode = "captureEvents()+ret.addEventListener(capture)";
+        } else if (typeof ret.subscribe === "function") {
+          ret.subscribe(cb);
+          diag.captureMode = "captureEvents()+ret.subscribe";
+        }
+      }
       return;
-    } catch (e2) {
-      lastCaptureErr = String(e2 && e2.message ? e2.message : e2);
+    } catch (e) {
+      diag.lastErr = (e && e.message) ? e.message : String(e);
     }
 
-    captureMode = "captureEvents(unusable)";
+    // Last resort: listen for window events (some builds dispatch DOM events)
+    try {
+      window.addEventListener("capture", (ev) => cb(ev, ev && ev.detail));
+      diag.captureMode = "window.addEventListener(capture)";
+    } catch (e) {
+      diag.lastErr = (e && e.message) ? e.message : String(e);
+    }
   }
 
   function progflashCaptureRs() {
-    startCaptureEvents();
-
-    if (lastFrame) return lastFrame;
-
-    // Last resort: older global captureRs
-    try {
-      if (typeof window.captureRs === "function") {
-        const img = toImageData(window.captureRs());
-        if (img) {
-          lastFrame = img;
-          captureMode = "window.captureRs()";
-          return img;
-        }
-      }
-    } catch (e) {
-      lastCaptureErr = String(e && e.message ? e.message : e);
-    }
-
-    return null;
-  }
-
-  function progflashCaptureInfo() {
-    return { started: captureStarted, mode: captureMode, lastErr: lastCaptureErr };
+    ensureCaptureEventsStarted();
+    return lastFrame;
   }
 
   function progflashLoadImage(url) {
@@ -135,23 +140,23 @@
     });
   }
 
+  // Luma-based match (more robust than using only red channel)
   function progflashFindAnchor(hay, needle, opts = {}) {
+    if (!hay || !needle) return null;
+
     const tolerance = opts.tolerance ?? 65;
     const stride = opts.stride ?? 1;
     const minScore = opts.minScore ?? 0.5;
     const returnBest = !!opts.returnBest;
 
-    if (!hay || !needle) return returnBest ? { ok: false, score: 0, best: null } : null;
-
     const hw = hay.width, hh = hay.height;
     const nw = needle.width, nh = needle.height;
-    if (nw <= 0 || nh <= 0 || nw > hw || nh > hh) {
-      return returnBest ? { ok: false, score: 0, best: null } : null;
-    }
+    if (nw > hw || nh > hh) return returnBest ? { ok: false, score: 0, best: null } : null;
 
     const h = hay.data;
     const n = needle.data;
 
+    // precompute needle luminance
     const nLum = new Uint8Array(nw * nh);
     for (let j = 0; j < nh; j++) {
       for (let i = 0; i < nw; i++) {
@@ -174,8 +179,12 @@
             if (Math.abs(lum - nLum[j * nw + i]) <= tolerance) good++;
           }
         }
+
         const score = good / total;
-        if (score > bestScore) { bestScore = score; best = { x, y, w: nw, h: nh }; }
+        if (score > bestScore) {
+          bestScore = score;
+          best = { x, y, w: nw, h: nh };
+        }
         if (score >= minScore) {
           return returnBest ? { ok: true, x, y, w: nw, h: nh, score, best } : { x, y, w: nw, h: nh };
         }
@@ -186,7 +195,7 @@
   }
 
   window.progflashCaptureRs = progflashCaptureRs;
-  window.progflashCaptureInfo = progflashCaptureInfo;
   window.progflashLoadImage = progflashLoadImage;
   window.progflashFindAnchor = progflashFindAnchor;
+  window.progflashCaptureDiag = diag;
 })();
