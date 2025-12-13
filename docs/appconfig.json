@@ -1,13 +1,12 @@
 {
   "appName": "ProgFlash",
-  "description": "ProgFlash lock debugger",
-  "appUrl": "index.html",
-  "iconUrl": "icon.png",
-  "defaultWidth": 320,
+  "description": "Flashes overlay when RS crafting bar locks / loses lock.",
+  "appUrl": "./index.html",
+  "iconUrl": "./icon.png",
+  "defaultWidth": 420,
   "defaultHeight": 420,
   "request": [
     "pixel",
     "overlay"
-  ],
-  "version": "1765632483"
+  ]
 }

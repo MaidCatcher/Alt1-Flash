@@ -1,6 +1,6 @@
-import { captureRs, loadImage, findAnchor, MATCHER_VERSION } from "./matcher.js?v=1765632483";
+import { captureRs, loadImage, findAnchor, MATCHER_VERSION } from "./matcher.js";
 
-const APP_VERSION = "1765632483";
+const APP_VERSION = Date.now();
 
 const statusEl = document.getElementById("status");
 const modeEl   = document.getElementById("mode");
@@ -20,17 +20,7 @@ function rgba(r,g,b,a=255){
   return (r&255)|((g&255)<<8)|((b&255)<<16)|((a&255)<<24);
 }
 
-function clearGroup(name){
-  if (!window.alt1 || !alt1.permissionOverlay) return;
-  alt1.overLaySetGroup(name);
-  alt1.overLayClearGroup(name);
-}
-
-function clearDebug() {
-  clearGroup("progflash_debug");
-}
-
-// ---------- Flash (safe; no setInterval storms) ----------
+/* ================= FLASH (safe, finite) ================= */
 let flashing = false;
 let lastFlashAt = 0;
 const FLASH_COOLDOWN_MS = 1500;
@@ -47,12 +37,12 @@ async function flashOverlay({ cycles = 3, intervalMs = 300 } = {}) {
   flashing = true;
 
   const g = "progflash_flash";
-  const colorBlue = -16776961; // signed 0xFF0000FF
+  const colorBlue = -16776961;
 
   try {
     for (let i = 0; i < cycles; i++) {
       alt1.overLaySetGroup(g);
-      alt1.overLayText("PROGFLASH", colorBlue, 22, 30, 53, 900);
+      alt1.overLayText("PROGFLASH", colorBlue, 22, 30, 53, 800);
       await sleep(intervalMs);
       alt1.overLayClearGroup(g);
       await sleep(intervalMs);
@@ -64,7 +54,7 @@ async function flashOverlay({ cycles = 3, intervalMs = 300 } = {}) {
   }
 }
 
-// ---------- Capture ----------
+/* ================= Capture helpers ================= */
 function captureRsViewport() {
   const full = captureRs();
   if (!full) return null;
@@ -74,12 +64,19 @@ function captureRsViewport() {
   const x = alt1.rsX || 0;
   const y = alt1.rsY || 0;
 
-  if (w && h && full.width === w && full.height === h && x === 0 && y === 0) return full;
+  // If it already matches viewport, use it
+  if (w && h && full.width === w && full.height === h && x === 0 && y === 0) {
+    return full;
+  }
+  // If viewport dims missing, fall back
   if (!w || !h) return full;
 
+  // Normalize using canvas
   const c = document.createElement("canvas");
-  c.width = w; c.height = h;
+  c.width = w;
+  c.height = h;
   const ctx = c.getContext("2d", { willReadFrequently: true });
+
   try {
     ctx.putImageData(full, -x, -y);
     return ctx.getImageData(0, 0, w, h);
@@ -88,115 +85,162 @@ function captureRsViewport() {
   }
 }
 
-// ---------- Main state ----------
+function clearGroup(group){
+  if (!window.alt1 || !alt1.permissionOverlay) return;
+  alt1.overLaySetGroup(group);
+  alt1.overLayClearGroup(group);
+}
+
+/* ================= State ================= */
 let running = false;
+let loop = null;
+
 let anchor = null;
 let lastSeen = 0;
-let loop = null;
 let tries = 0;
 let hits = 0;
 
-function drawBestGuess(best) {
-  if (!window.alt1 || !alt1.permissionOverlay) return;
-  if (!best || best.score == null) return;
-
-  if (best.score < 0.40) {
-    clearGroup("progflash_best");
-    return;
-  }
-
-  alt1.overLaySetGroup("progflash_best");
-  alt1.overLayClearGroup("progflash_best");
-  alt1.overLayRect(
-    rgba(255, 215, 0, 120),
-    (alt1.rsX || 0) + best.x,
-    (alt1.rsY || 0) + best.y,
-    best.w,
-    best.h,
-    220,
-    2
-  );
+function setUiStateIdle(){
+  setStatus("Idle");
+  setMode("Not running");
+  setLock("none");
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+}
+function setUiStateRunning(){
+  setStatus("Searching…");
+  setMode("Running");
+  setLock("none");
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
 }
 
+/* ================= Main ================= */
 async function start() {
   if (!window.alt1) { alert("Open this inside Alt1."); return; }
 
   if (!alt1.permissionPixel || !alt1.permissionOverlay) {
     setStatus("Missing permissions");
-    dbg("Enable 'View screen' and 'Show overlay' for ProgFlash in Alt1 settings.");
+    dbg(
+      `ProgFlash v=${APP_VERSION}\n` +
+      `Matcher v=${MATCHER_VERSION}\n` +
+      `alt1: ${!!window.alt1}\noverlay: ${alt1.permissionOverlay}\ncapture: ${alt1.permissionPixel}\n\n` +
+      `Enable 'View screen' and 'Show overlay' permissions for this app.`
+    );
     return;
   }
 
   if (!anchor) {
     setStatus("Loading anchor…");
-    anchor = await loadImage("./img/progbar_anchor.png?v=1765632483");
+    // cache-bust anchor too
+    anchor = await loadImage(`./img/progbar_anchor.png?v=${APP_VERSION}`);
   }
 
   running = true;
-
-  startBtn.disabled = true;
-  stopBtn.disabled = false;
-
-  setMode("Running");
-  setStatus("Searching…");
-  setLock("none");
-  clearDebug();
+  setUiStateRunning();
+  clearGroup("progflash_debug");
   clearGroup("progflash_best");
 
-  tries = 0; hits = 0; lastSeen = 0;
+  tries = 0;
+  hits = 0;
+  lastSeen = 0;
 
-  if (loop) { clearInterval(loop); loop = null; }
+  if (loop) clearInterval(loop);
 
   loop = setInterval(() => {
     if (!running) return;
 
-    const img = captureRsViewport();
-    if (!img) return;
+    // Permission removed mid-run
+    if (!alt1.permissionPixel || !alt1.permissionOverlay) {
+      stop();
+      setStatus("Permissions removed");
+      return;
+    }
 
+    const img = captureRsViewport();
     tries++;
 
-    const res = findAnchor(img, anchor, { tolerance: 65, stride: 1, minScore: 0.50, returnBest: true });
-    const bestScore = (res && typeof res.score === "number") ? res.score : null;
-
-    dbg(
-      "ProgFlash v=" + APP_VERSION + "\n" +
-      "Matcher v=" + MATCHER_VERSION + "\n" +
-      "anchor w=" + anchor.width + " h=" + anchor.height + "\n" +
-      "tries=" + tries + " hits=" + hits + "\n" +
-      "best score=" + (bestScore == null ? "n/a" : bestScore.toFixed(3))
-    );
-
-    if (res && res.x != null) drawBestGuess(res);
-
-    if (res && res.ok) {
-      hits++;
-      lastSeen = Date.now();
-
-      setStatus("Locked");
-      setLock(`x=${res.x}, y=${res.y}`);
-
-      alt1.overLaySetGroup("progflash_debug");
-      alt1.overLayClearGroup("progflash_debug");
-      alt1.overLayRect(
-        rgba(0, 120, 255, 200),
-        (alt1.rsX || 0) + res.x,
-        (alt1.rsY || 0) + res.y,
-        res.w,
-        res.h,
-        300,
-        2
+    if (!img) {
+      dbg(
+        `ProgFlash v=${APP_VERSION}\n` +
+        `Matcher v=${MATCHER_VERSION}\n` +
+        `Anchor w=${anchor?.width ?? "?"} h=${anchor?.height ?? "?"}\n` +
+        `tries=${tries} hits=${hits}\n` +
+        `CAPTURE FAILED (img=null)\n` +
+        `alt1.rsWidth=${alt1.rsWidth} alt1.rsHeight=${alt1.rsHeight}\n`
       );
       return;
     }
 
+    // Always compute best score (even if not ok)
+    const best = findAnchor(img, anchor, {
+      tolerance: 70,
+      stride: 1,
+      minScore: 0.52,
+      returnBest: true
+    });
+
+    const bestScore = (best && typeof best.score === "number") ? best.score.toFixed(3) : "n/a";
+
+    // Show best match rectangle when it's somewhat close
+    if (best && best.x != null && best.score >= 0.35 && alt1.permissionOverlay) {
+      alt1.overLaySetGroup("progflash_best");
+      alt1.overLayRect(
+        rgba(255, 235, 59, 140), // yellow-ish
+        (alt1.rsX || 0) + best.x,
+        (alt1.rsY || 0) + best.y,
+        best.w,
+        best.h,
+        200,
+        2
+      );
+    } else {
+      clearGroup("progflash_best");
+    }
+
+    dbg(
+      `ProgFlash v=${APP_VERSION}\n` +
+      `Matcher v=${MATCHER_VERSION}\n` +
+      `Anchor w=${anchor.width} h=${anchor.height}\n` +
+      `tries=${tries} hits=${hits}\n` +
+      `img=${img.width}x${img.height}\n` +
+      `best score=${bestScore}\n` +
+      (best?.ok ? `LOCK @ ${best.x},${best.y}\n` : `no lock\n`) +
+      `overlay: ${alt1.permissionOverlay}\n` +
+      `capture: ${alt1.permissionPixel}\n`
+    );
+
+    if (best && best.ok) {
+      hits++;
+      lastSeen = Date.now();
+      setStatus("Locked");
+      setLock(`x=${best.x}, y=${best.y}`);
+
+      // Debug box for actual lock
+      if (alt1.permissionOverlay) {
+        alt1.overLaySetGroup("progflash_debug");
+        alt1.overLayRect(
+          rgba(0, 120, 255, 200),
+          (alt1.rsX || 0) + best.x,
+          (alt1.rsY || 0) + best.y,
+          best.w,
+          best.h,
+          300,
+          2
+        );
+      }
+      return;
+    }
+
+    // Lost lock flash (if we had a lock recently)
     if (lastSeen && Date.now() - lastSeen > 450) {
-      clearDebug();
+      clearGroup("progflash_debug");
       flashOverlay().catch(console.error);
       lastSeen = 0;
       setStatus("Flashed!");
       setLock("none");
     }
-  }, 150);
+  }, 200);
 }
 
 function stop() {
@@ -204,43 +248,30 @@ function stop() {
   if (loop) clearInterval(loop);
   loop = null;
 
-  startBtn.disabled = false;
-  stopBtn.disabled = true;
-
-  setMode("Not running");
-  setStatus("Idle");
-  setLock("none");
-
-  clearDebug();
+  setUiStateIdle();
+  clearGroup("progflash_debug");
   clearGroup("progflash_best");
   clearGroup("progflash_flash");
-
   flashing = false;
 }
 
+/* ================= Buttons ================= */
 testBtn.onclick = () => {
   console.log("TEST BUTTON CLICKED", Date.now());
   setStatus("Test flash");
   flashOverlay().catch(console.error);
 };
 
-startBtn.onclick = () => {
-  console.log("START CLICKED", Date.now());
-  start().catch(e => { console.error(e); setStatus("Error (see console)"); });
-};
+startBtn.onclick = () => start().catch(e => { console.error(e); setStatus("Error (see console)"); });
 
-stopBtn.onclick = () => {
-  console.log("STOP CLICKED", Date.now());
-  stop();
-};
+stopBtn.onclick = () => stop();
 
-setStatus("Idle");
-setMode("Not running");
-setLock("none");
+/* ================= Init ================= */
+setUiStateIdle();
 dbg(
-  "ProgFlash v=" + APP_VERSION + "\n" +
-  "Matcher v=" + MATCHER_VERSION + "\n" +
-  "alt1: " + !!window.alt1 + "\n" +
-  "overlay: " + (window.alt1 ? alt1.permissionOverlay : false) + "\n" +
-  "capture: " + (window.alt1 ? alt1.permissionPixel : false)
+  `ProgFlash v=${APP_VERSION}\n` +
+  `Matcher v=${MATCHER_VERSION}\n` +
+  `alt1: ${!!window.alt1}\n` +
+  `overlay: ${window.alt1 ? alt1.permissionOverlay : false}\n` +
+  `capture: ${window.alt1 ? alt1.permissionPixel : false}\n`
 );
