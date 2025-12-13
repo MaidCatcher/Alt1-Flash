@@ -22,27 +22,22 @@ function captureRs() {
   if (!window.alt1) return null;
   if (!alt1.permissionPixel) return null;
 
-  const x = alt1.rsX;
-  const y = alt1.rsY;
-  const w = alt1.rsWidth;
-  const h = alt1.rsHeight;
-
-  if (!w || !h) return null;
-
   try {
-    // IMPORTANT: start capture once
+    // Start capture once by setting interval (property, not function)
     if (!captureStarted) {
-      alt1.captureInterval(x, y, w, h, 100);
+      alt1.captureInterval = 100; // ms
       captureStarted = true;
     }
 
-    // Read latest captured frame
     const cap = alt1.captureMethod();
     if (!cap) return null;
 
-    // Convert capture handle → ImageData
-    if (cap.data && cap.width && cap.height) return cap;
+    // ImageData directly
+    if (cap.data && cap.width && cap.height) {
+      return cap;
+    }
 
+    // Capture handle → ImageData
     if (typeof cap.toData === "function") {
       const img = cap.toData();
       if (img && img.data) return img;
@@ -58,6 +53,7 @@ function captureRs() {
 
   return null;
 }
+
 
 
 
