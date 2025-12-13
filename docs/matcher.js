@@ -25,19 +25,25 @@ export function captureRs() {
 
   const w = alt1.rsWidth;
   const h = alt1.rsHeight;
+  const x = alt1.rsX;
+  const y = alt1.rsY;
+
   if (!w || !h) return null;
 
-  // OpenGL capture uses client-relative coords
   try {
-    const cap = alt1.capture(0, 0, w, h);
-    const img = toImageData(cap);
-    if (img) return img;
-  } catch (e) {
-    console.error("capture failed", e);
-  }
+    // New Alt1 capture API (this is what YOUR build uses)
+    const cap = alt1.captureMethod(x, y, w, h);
+    if (!cap) return null;
 
-  return null;
-}
+    // Some builds return ImageData directly
+    if (cap.data && cap.width && cap.height) {
+      return cap;
+    }
+
+    // Others return a handle that must be converted
+    if (typeof cap.toData === "function") {
+      const img = cap.toDat
+
 
 export async function loadImage(url) {
   const img = new Image();
