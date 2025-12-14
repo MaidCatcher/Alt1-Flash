@@ -1,56 +1,29 @@
-<!doctype html>
+<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
   <title>ProgFlash</title>
-  <style>
-    body { font-family: sans-serif; }
-    button, input, select { margin: 4px; }
-    #debugBox {
-      white-space: pre;
-      font-family: monospace;
-      background: #000;
-      color: #0f0;
-      padding: 6px;
-      margin-top: 6px;
-    }
-  </style>
 </head>
-
 <body>
-
-<h3>ProgFlash</h3>
-
-<button id="startBtn">Start</button>
-<button id="stopBtn" disabled>Stop</button>
-<button id="testFlashBtn">Test Flash</button>
-<br>
-
-Flash at %
-<input id="flashAt" type="number" value="95" min="1" max="100">
-Flash style
-<select id="flashStyle">
-  <option value="text">Text</option>
-  <option value="fullscreen">Fullscreen</option>
-</select>
-
-<p>
-<b>Status:</b> <span id="status"></span><br>
-<b>Mode:</b> <span id="mode"></span><br>
-<b>Lock:</b> <span id="lock"></span><br>
-<b>Progress:</b> <span id="progress">—</span>
-</p>
-
-<div id="debugBox"></div>
-
-<!-- ORDER MATTERS -->
-
-<!-- Your matcher -->
-<script src="matcher.js"></script>
-
-<!-- Your app -->
-<script src="app.js"></script>
-
-
+  <h2>ProgFlash</h2>
+  <div>
+    <button id="start">Start</button>
+    <button id="stop">Stop</button>
+    <button id="testflash">Test flash</button>
+  </div>
+  <div>
+    Flash at % <input id="flashAt" value="95" size="3" />
+    Flash style <select id="flashStyle">
+      <option value="text">Text</option>
+      <option value="fullscreen">Fullscreen</option>
+    </select>
+  </div>
+  <pre>Status: <span id="status">Idle</span>
+Mode: <span id="mode">Waiting</span>
+Lock: <span id="lock">none</span>
+Progress: <span id="progress">—</span></pre>
+  <pre id="log"></pre>
+  <script src="matcher.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
