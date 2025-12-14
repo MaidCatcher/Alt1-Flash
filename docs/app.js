@@ -214,11 +214,25 @@ async function start(){
     setStatus("Locked");
     setLock(`x=${res.x}, y=${res.y}`);
 
-    // Progress bar geometry relative to anchor
-const BAR_X_OFFSET = 14;   // pixels right of anchor
-const BAR_Y_OFFSET = 0;    // same vertical alignment
-const BAR_WIDTH    = 160;  // visible green bar width
-const BAR_HEIGHT   = 6;    // bar thickness
+ // Progress bar geometry relative to anchor (RS crafting UI)
+const BAR_X_OFFSET = 26;   // <-- critical change
+const BAR_Y_OFFSET = 2;
+const BAR_WIDTH    = 180;
+const BAR_HEIGHT   = 8;
+
+	// temp debug
+
+alt1.overLaySetGroup("progflash_debug");
+alt1.overLayRect(
+  rgba(255,0,0,180),
+  (alt1.rsX||0) + res.x + BAR_X_OFFSET,
+  (alt1.rsY||0) + res.y + BAR_Y_OFFSET,
+  BAR_WIDTH,
+  BAR_HEIGHT,
+  200,
+  2
+);
+
 
 const raw = measureProgressPercent(
   img,
