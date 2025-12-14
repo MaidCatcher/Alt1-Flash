@@ -11,6 +11,9 @@
     pre { white-space: pre-wrap; background:#000; color:#00ff00; padding:8px; border-radius: 6px; }
     .err { white-space: pre-wrap; background:#fee; border:1px solid #f99; padding:8px; border-radius:6px; }
     code { background:#eee; padding:2px 4px; border-radius:4px; }
+    label { margin-right: 10px; }
+    input[type="number"] { width: 70px; padding: 4px; }
+    select { padding: 4px; }
   </style>
 </head>
 <body>
@@ -22,10 +25,26 @@
     <button id="testFlashBtn">Test flash</button>
   </div>
 
+  <div class="row">
+    <label>
+      Flash at %
+      <input id="thresholdPct" type="number" min="1" max="99" step="1" value="95">
+    </label>
+
+    <label>
+      Flash style
+      <select id="flashStyle">
+        <option value="fullscreen">Fullscreen</option>
+        <option value="text">Text</option>
+      </select>
+    </label>
+  </div>
+
   <div class="row status">
     <div><b>Status:</b> <span id="status">Idle</span></div>
     <div><b>Mode:</b> <span id="mode">Not running</span></div>
     <div><b>Lock:</b> <span id="lock">none</span></div>
+    <div><b>Progress:</b> <span id="progressPct">—</span></div>
   </div>
 
   <div class="row">
@@ -59,9 +78,8 @@
     });
   </script>
 
-  <!-- IMPORTANT: classic scripts (NO modules), matcher FIRST then app -->
-<script src="./matcher.js?v=10"></script>
-<script src="./app.js?v=10"></script>
-
+  <!-- IMPORTANT: matcher FIRST, then app (classic scripts, NO modules) -->
+  <script src="./matcher.js?v=200"></script>
+  <script src="./app.js?v=200"></script>
 </body>
 </html>
