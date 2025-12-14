@@ -201,19 +201,21 @@ async function start(){
     setStatus("Locked");
     setLock(`x=${res.x}, y=${res.y}`);
 
-    const pctRaw=measureProgressPercent(img,res.x,res.y,anchor.width,anchor.height);
-    if (pctRaw==null) return;
+    const pctRaw = measureProgressPercent(img,res.x,res.y,anchor.width,anchor.height);
+if (pctRaw==null) return;
 
-    const pct=Math.round(pctRaw);
+let pct = Math.round(pctRaw); // ← FIX: must be let, not const
 
-    // 🔒 monotonic per craft
-    if (lastPct!=null) {
-      if (pct < lastPct - 3 && pct < 8){
-        flashed=false;
-      } else {
-        pct=Math.max(pct,lastPct);
-      }
-    }
+// 🔒 monotonic per craft
+if (lastPct != null) {
+  if (pct < lastPct - 3 && pct < 8) {
+    // new craft detected
+    flashed = false;
+  } else {
+    pct = Math.max(pct, lastPct);
+  }
+}
+
 
     setProgress(pct+"%");
 
