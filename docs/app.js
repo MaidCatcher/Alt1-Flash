@@ -134,35 +134,35 @@ function getPx(img,x,y){
 }
 function lum(p){ return (p.r*30+p.g*59+p.b*11)/100; }
 
-function measureProgressPercent(img,x,y,w,h){
-  const scanY=y+h+6;
-  if(scanY<0||scanY>=img.height) return null;
+function measureProgressPercent(img, barX, barY, barW, barH) {
+  if (!img || barW < 20 || barH < 4) return null;
 
-  const ref=getPx(img,x+Math.floor(w/2),scanY);
-  if(!ref) return null;
+  // Scan a horizontal line INSIDE the bar (vertically centered)
+  const scanY = Math.floor(barY + barH / 2);
+  if (scanY < 0 || scanY >= img.height) return null;
 
-  let left=x,right=x;
+  let filled = 0;
+  let total = 0;
 
-  for(let i=0;i<900;i++){
-    const p=getPx(img,x-i,scanY);
-    if(!p||Math.abs(lum(p)-lum(ref))>20){ left=x-i+1; break; }
-  }
-  for(let i=0;i<1600;i++){
-    const p=getPx(img,x+i,scanY);
-    if(!p||Math.abs(lum(p)-lum(ref))>20){ right=x+i-1; break; }
-  }
+  for (let x = barX; x < barX + barW; x++) {
+    if (x < 0 || x >= img.width) continue;
+    const i = (scanY * img.width + x) * 4;
+    const r = img.data[i];
+    const g = img.data[i + 1];
+    const b = img.data[i + 2];
 
-  const width=right-left;
-  if(width<120) return null;
+    // RuneScape progress bar green detection
+    const isGreen = g > 120 && g > r + 15 && g > b + 15;
 
-  let fillX=left;
-  for(let px=left;px<=right;px++){
-    const p=getPx(img,px,scanY);
-    if(p && p.g>p.r+15 && p.g>p.b+15) fillX=px;
+    total++;
+    if (isGreen) filled++;
   }
 
-  return Math.max(0,Math.min(100,((fillX-left)/width)*100));
+  if (total < 10) return null;
+
+  return Math.round((filled / total) * 100);
 }
+
 
 /* ===================== Main ===================== */
 
