@@ -1,44 +1,52 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html>
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="utf-8">
   <title>ProgFlash</title>
   <style>
     body { font-family: sans-serif; }
-    .row { margin: 4px 0; }
-    #debugBox { white-space: pre; font-family: monospace; }
+    button, input, select { margin: 4px; }
+    #debugBox {
+      white-space: pre;
+      font-family: monospace;
+      background: #000;
+      color: #0f0;
+      padding: 6px;
+      margin-top: 6px;
+    }
   </style>
 </head>
+
 <body>
 
-  <div class="row"><strong>Status:</strong> <span id="status">Idle</span></div>
-  <div class="row"><strong>Mode:</strong> <span id="mode">Not running</span></div>
-  <div class="row"><strong>Lock:</strong> <span id="lock">none</span></div>
-  <div class="row"><strong>Progress:</strong> <span id="progress">—</span></div>
+<h3>ProgFlash</h3>
 
-  <div class="row">
-    Flash at:
-    <input id="flashAt" type="number" min="1" max="100" value="95" /> %
-  </div>
+<button id="startBtn">Start</button>
+<button id="stopBtn" disabled>Stop</button>
+<button id="testFlashBtn">Test Flash</button>
+<br>
 
-  <div class="row">
-    Flash style:
-    <select id="flashStyle">
-      <option value="text">Text</option>
-      <option value="fullscreen">Fullscreen</option>
-    </select>
-  </div>
+Flash at %
+<input id="flashAt" type="number" value="95" min="1" max="100">
+Flash style
+<select id="flashStyle">
+  <option value="text">Text</option>
+  <option value="fullscreen">Fullscreen</option>
+</select>
 
-  <div class="row">
-    <button id="startBtn">Start</button>
-    <button id="stopBtn" disabled>Stop</button>
-    <button id="testFlashBtn">Test Flash</button>
-  </div>
+<p>
+<b>Status:</b> <span id="status"></span><br>
+<b>Mode:</b> <span id="mode"></span><br>
+<b>Lock:</b> <span id="lock"></span><br>
+<b>Progress:</b> <span id="progress">—</span>
+</p>
 
-  <pre id="debugBox"></pre>
+<div id="debugBox"></div>
 
-  <!-- IMPORTANT: matcher first, then app -->
-  <script src="matcher.js?v=6"></script>
-  <script src="app.js?v=6"></script>
+<!-- ORDER MATTERS -->
+<script src="https://runeapps.org/alt1/alt1lib.js"></script>
+<script src="matcher.js"></script>
+<script src="app.js"></script>
+
 </body>
 </html>
