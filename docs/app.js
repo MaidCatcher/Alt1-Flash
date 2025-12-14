@@ -1,56 +1,405 @@
+// app.js — Alt1 compatible (NO modules / NO imports)
+// Requires matcher.js to expose: progflashCaptureRs, progflashLoadImage, progflashFindAnchor
 
-let config = {
-  flashAt: 95,
-  flashStyle: "text",
-  anchorImage: "progbar_anchor.png"
-};
+const statusEl = document.getElementById("status");
+const modeEl = document.getElementById("mode");
+const lockEl = document.getElementById("lock");
+const progressEl = document.getElementById("progressPct");
+const dbgEl = document.getElementById("debugBox");
 
-let running = false;
+const startBtn = document.getElementById("startBtn");
+const stopBtn = document.getElementById("stopBtn");
+const testBtn = document.getElementById("testFlashBtn");
 
-function log(msg) {
-  document.getElementById("log").textContent += msg + "\n";
+const thresholdInput = document.getElementById("thresholdPct");
+const flashStyleSel = document.getElementById("flashStyle");
+
+function setStatus(v) { statusEl.textContent = v; }
+function setMode(v) { modeEl.textContent = v; }
+function setLock(v) { lockEl.textContent = v; }
+function setProgress(v) { progressEl.textContent = v; }
+function dbg(v) { dbgEl.textContent = String(v); }
+
+function rgba(r, g, b, a = 255) {
+  return (r & 255) | ((g & 255) << 8) | ((b & 255) << 16) | ((a & 255) << 24);
+}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+const APP_V = Date.now();
+
+// ---------------- Settings (persist) ----------------
+const LS_THRESH = "progflash_thresholdPct";
+const LS_STYLE = "progflash_flashStyle";
+
+function loadSettings() {
+  const t = parseInt(localStorage.getItem(LS_THRESH) || "95", 10);
+  const s = localStorage.getItem(LS_STYLE) || "fullscreen";
+  if (thresholdInput) thresholdInput.value = String(Math.min(99, Math.max(1, isFinite(t) ? t : 95)));
+  if (flashStyleSel) flashStyleSel.value = (s === "text") ? "text" : "fullscreen";
+}
+function saveSettings() {
+  const t = Math.min(99, Math.max(1, parseInt((thresholdInput && thresholdInput.value) || "95", 10) || 95));
+  if (thresholdInput) thresholdInput.value = String(t);
+  localStorage.setItem(LS_THRESH, String(t));
+  localStorage.setItem(LS_STYLE, (flashStyleSel && flashStyleSel.value === "text") ? "text" : "fullscreen");
+}
+loadSettings();
+if (thresholdInput) thresholdInput.addEventListener("change", saveSettings);
+if (flashStyleSel) flashStyleSel.addEventListener("change", saveSettings);
+
+function getThreshold() {
+  const v = parseInt((thresholdInput && thresholdInput.value) || "95", 10);
+  return Math.min(99, Math.max(1, isFinite(v) ? v : 95));
+}
+function getFlashStyle() {
+  return (flashStyleSel && flashStyleSel.value === "text") ? "text" : "fullscreen";
 }
 
-async function findAnchorAndLock() {
-  log("Searching for anchor...");
-  const result = await window.findAnchor(config.anchorImage);
-  if (result.ok) {
-    log("Locked at: x=" + result.x + ", y=" + result.y);
-    return result;
-  } else {
-    log("Failed to find anchor.");
-    return null;
+// ---------------- Flash (Text / Fullscreen) ----------------
+let flashing = false;
+let lastFlashAt = 0;
+const FLASH_COOLDOWN_MS = 1200;
+
+async function flashText() {
+  if (!window.alt1 || !alt1.permissionOverlay) return;
+  const now = Date.now();
+  if (now - lastFlashAt < FLASH_COOLDOWN_MS) return;
+  lastFlashAt = now;
+  if (flashing) return;
+  flashing = true;
+
+  const g = "progflash_flash";
+  try {
+    for (let i = 0; i < 2; i++) {
+      alt1.overLaySetGroup(g);
+      alt1.overLayText("PROGFLASH", -1, 36, 40, 80, 700);
+      await sleep(180);
+      alt1.overLayClearGroup(g);
+      await sleep(180);
+    }
+  } finally {
+    try { alt1.overLaySetGroup(g); alt1.overLayClearGroup(g); } catch {}
+    flashing = false;
   }
+}
+
+async function flashFullscreen() {
+  if (!window.alt1 || !alt1.permissionOverlay) return;
+  const now = Date.now();
+  if (now - lastFlashAt < FLASH_COOLDOWN_MS) return;
+  lastFlashAt = now;
+  if (flashing) return;
+  flashing = true;
+
+  const g = "progflash_flash";
+  try {
+    const x = alt1.rsX || 0;
+    const y = alt1.rsY || 0;
+    const w = alt1.rsWidth || 0;
+    const h = alt1.rsHeight || 0;
+
+    for (let i = 0; i < 2; i++) {
+      alt1.overLaySetGroup(g);
+      alt1.overLayRect(rgba(255, 255, 255, 200), x, y, w, h, 200, 0);
+      await sleep(120);
+      alt1.overLayClearGroup(g);
+      await sleep(120);
+    }
+  } finally {
+    try { alt1.overLaySetGroup(g); alt1.overLayClearGroup(g); } catch {}
+    flashing = false;
+  }
+}
+
+function flashNow() {
+  return (getFlashStyle() === "text" ? flashText() : flashFullscreen()).catch(console.error);
+}
+
+function clearDebugOverlay() {
+  if (!window.alt1 || !alt1.permissionOverlay) return;
+  alt1.overLaySetGroup("progflash_debug");
+  alt1.overLayClearGroup("progflash_debug");
+}
+
+// ---------------- Pixel helpers ----------------
+function getPx(img, x, y) {
+  if (!img) return null;
+  if (x < 0 || y < 0 || x >= img.width || y >= img.height) return null;
+  const i = (y * img.width + x) * 4;
+  const d = img.data;
+  return { r: d[i], g: d[i + 1], b: d[i + 2] };
+}
+function lum(p) {
+  return (p.r * 30 + p.g * 59 + p.b * 11) / 100;
+}
+function colorDist(a, b) {
+  return Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b);
+}
+
+// Measure progress bar fill percent by scanning BELOW the tiny anchor,
+// auto-detecting whether the filled region is brighter or darker,
+// with a green-dominance fallback.
+function measureProgressPercent(img, lockX, lockY, anchorW, anchorH) {
+  const baseY = lockY + anchorH + 6;
+  const ys = [baseY - 2, baseY, baseY + 2, baseY + 4];
+
+  let best = null;
+
+  for (const y of ys) {
+    if (y < 0 || y >= img.height) continue;
+
+    const cx = Math.min(img.width - 1, Math.max(0, lockX + Math.floor(anchorW / 2)));
+    const ref = getPx(img, cx, y);
+    if (!ref) continue;
+
+    // Find bar interior bounds by walking until we leave the interior-like pixels.
+    let left = cx;
+    for (let i = 0; i < 900; i++) {
+      const x = cx - i;
+      const p = getPx(img, x, y);
+      if (!p || colorDist(p, ref) > 95) { left = x + 1; break; }
+      left = x;
+    }
+
+    let right = cx;
+    for (let i = 0; i < 1600; i++) {
+      const x = cx + i;
+      const p = getPx(img, x, y);
+      if (!p || colorDist(p, ref) > 95) { right = x - 1; break; }
+      right = x;
+    }
+
+    const width = right - left + 1;
+    if (width < 120) continue;
+
+    const leftP = getPx(img, Math.min(right, left + 5), y);
+    const rightP = getPx(img, Math.max(left, right - 5), y);
+    if (!leftP || !rightP) continue;
+
+    const Lleft = lum(leftP);
+    const Lright = lum(rightP);
+
+    const delta = 12;
+    let mode = "greenFallback";
+    if (Lleft > Lright + delta) mode = "brighter";
+    else if (Lleft < Lright - delta) mode = "darker";
+
+    function looksFilled(p) {
+      if (!p) return false;
+
+      if (mode === "brighter") {
+        return lum(p) > (Lright + 8);
+      }
+      if (mode === "darker") {
+        return lum(p) < (Lright - 8);
+      }
+
+      return (p.g > 65) && (p.g > p.r + 15) && (p.g > p.b + 15);
+    }
+
+    let fillX = left;
+    let seenFill = false;
+
+    for (let x = left; x <= right; x++) {
+      const p = getPx(img, x, y);
+      if (!p) break;
+
+      const filled = looksFilled(p);
+      if (filled) {
+        fillX = x;
+        seenFill = true;
+      } else if (seenFill && x > left + 12) {
+        break;
+      }
+    }
+
+    const pct = Math.max(0, Math.min(100, ((fillX - left) / width) * 100));
+    if (best == null || pct > best) best = pct;
+  }
+
+  return best;
+}
+
+// ---------------- Main logic ----------------
+let running = false;
+let loop = null;
+let anchor = null;
+
+let lastPct = null;
+let flashedThisCraft = false;
+
+function matcherReady() {
+  return (
+    typeof window.progflashCaptureRs === "function" &&
+    typeof window.progflashLoadImage === "function" &&
+    typeof window.progflashFindAnchor === "function"
+  );
 }
 
 async function start() {
-  running = true;
-  log("Started");
-  const anchor = await findAnchorAndLock();
-  if (!anchor) return;
+  if (!window.alt1) { alert("Open this inside Alt1."); return; }
 
-  // Simulate progress loop
-  while (running) {
-    log("Progress: simulated");
-    await new Promise(res => setTimeout(res, 1000));
+  if (!alt1.permissionPixel || !alt1.permissionOverlay) {
+    setStatus("Missing permissions");
+    dbg(`ProgFlash v=${APP_V}\nEnable View screen + Show overlay in Alt1.`);
+    return;
   }
+
+  if (!matcherReady()) {
+    setStatus("matcher.js not loaded");
+    dbg(
+      `ProgFlash v=${APP_V}\n` +
+      `Missing matcher globals.\n` +
+      `capture=${typeof window.progflashCaptureRs}\n` +
+      `load=${typeof window.progflashLoadImage}\n` +
+      `find=${typeof window.progflashFindAnchor}`
+    );
+    return;
+  }
+
+  if (!anchor) {
+    setStatus("Loading anchor…");
+    anchor = await window.progflashLoadImage("./img/progbar_anchor.png?v=" + APP_V);
+  }
+
+  running = true;
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+
+  setMode("Running");
+  setStatus("Searching…");
+  setLock("none");
+  setProgress("—");
+
+  lastPct = null;
+  flashedThisCraft = false;
+  clearDebugOverlay();
+
+  if (loop) clearInterval(loop);
+
+  const tick = () => {
+    if (!running) return;
+
+    const img = window.progflashCaptureRs();
+    if (!img) {
+      setStatus("Searching…");
+      setLock("none");
+      setProgress("—");
+      dbg(`ProgFlash v=${APP_V}\ncaptureRs(): null`);
+      return;
+    }
+
+    const res = window.progflashFindAnchor(img, anchor, {
+      tolerance: 65,
+      stride: 1,
+      minScore: 0.50,
+      returnBest: true
+    });
+
+    const scoreTxt = (res && typeof res.score === "number") ? res.score.toFixed(3) : "n/a";
+
+    // Optional debug rectangle on best match
+    if (res && res.best && alt1.permissionOverlay) {
+      if (res.score >= 0.30) {
+        alt1.overLaySetGroup("progflash_debug");
+        alt1.overLayRect(
+          rgba(255, 255, 0, 180),
+          (alt1.rsX || 0) + res.best.x,
+          (alt1.rsY || 0) + res.best.y,
+          res.best.w,
+          res.best.h,
+          200,
+          2
+        );
+      } else {
+        clearDebugOverlay();
+      }
+    }
+
+    if (res && res.ok) {
+      setStatus("Locked");
+      setLock(`x=${res.x}, y=${res.y}`);
+
+      const pct = measureProgressPercent(img, res.x, res.y, anchor.width, anchor.height);
+      if (pct == null) {
+        setProgress("—");
+        lastPct = null;
+        flashedThisCraft = false;
+      } else {
+        const pctRound = Math.max(0, Math.min(100, Math.round(pct)));
+        setProgress(pctRound + "%");
+
+        // Reset for next craft when it drops low again
+        if (pctRound <= 5) flashedThisCraft = false;
+
+        const thresh = getThreshold();
+        if (!flashedThisCraft && lastPct != null && lastPct < thresh && pctRound >= thresh) {
+          flashedThisCraft = true;
+          flashNow();
+        }
+
+        lastPct = pctRound;
+      }
+    } else {
+      setStatus("Searching…");
+      setLock("none");
+      setProgress("—");
+      lastPct = null;
+      flashedThisCraft = false;
+    }
+
+    dbg(
+      `ProgFlash v=${APP_V}\n` +
+      `img=${img.width}x${img.height}\n` +
+      `anchor=${anchor.width}x${anchor.height}\n` +
+      `best score=${scoreTxt}\n` +
+      `ok=${!!(res && res.ok)}\n` +
+      `flashAt=${getThreshold()}%\n` +
+      `flashStyle=${getFlashStyle()}`
+    );
+  };
+
+  tick();
+  loop = setInterval(tick, 120);
 }
 
 function stop() {
   running = false;
-  log("Stopped");
+  if (loop) clearInterval(loop);
+  loop = null;
+
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+
+  setMode("Not running");
+  setStatus("Idle");
+  setLock("none");
+  setProgress("—");
+
+  lastPct = null;
+  flashedThisCraft = false;
+
+  clearDebugOverlay();
 }
 
-function testFlash() {
-  const flashStyle = document.getElementById("flashStyle").value;
-  if (flashStyle === "fullscreen") {
-    document.body.style.backgroundColor = "white";
-    setTimeout(() => document.body.style.backgroundColor = "", 100);
-  } else {
-    alert("FLASH!");
-  }
-}
+// ---------------- Buttons ----------------
+testBtn.onclick = () => {
+  setStatus("Test flash");
+  flashNow();
+};
 
-window.start = start;
-window.stop = stop;
-window.testFlash = testFlash;
+startBtn.onclick = () => {
+  start().catch(err => {
+    console.error(err);
+    setStatus("Error (see console)");
+  });
+};
+
+stopBtn.onclick = () => stop();
+
+// ---------------- Init ----------------
+setStatus("Idle");
+setMode("Not running");
+setLock("none");
+setProgress("—");
+dbg(`ProgFlash v=${APP_V}\nReady`);
