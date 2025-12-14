@@ -20,7 +20,10 @@ const flashStyleSel  = document.getElementById("flashStyle");
 function setStatus(v){ statusEl.textContent = v; }
 function setMode(v){ modeEl.textContent = v; }
 function setLock(v){ lockEl.textContent = v; }
-function setProgress(v){ progEl.textContent = v; }
+function setProgress(v){
+  if (progEl) progEl.textContent = v;
+}
+
 function dbg(v){ dbgEl.textContent = String(v); }
 
 function rgba(r,g,b,a=255){
