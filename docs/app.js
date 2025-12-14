@@ -1,4 +1,5 @@
 // app.js — Alt1 compatible (NO modules / NO imports)
+// Requires matcher.js to expose: progflashCaptureRs, progflashLoadImage, progflashFindAnchor
 
 const statusEl = document.getElementById("status");
 const modeEl = document.getElementById("mode");
@@ -33,24 +34,25 @@ const LS_STYLE = "progflash_flashStyle";
 function loadSettings() {
   const t = parseInt(localStorage.getItem(LS_THRESH) || "95", 10);
   const s = localStorage.getItem(LS_STYLE) || "fullscreen";
-  thresholdInput.value = String(Math.min(99, Math.max(1, isFinite(t) ? t : 95)));
-  flashStyleSel.value = (s === "text") ? "text" : "fullscreen";
+  if (thresholdInput) thresholdInput.value = String(Math.min(99, Math.max(1, isFinite(t) ? t : 95)));
+  if (flashStyleSel) flashStyleSel.value = (s === "text") ? "text" : "fullscreen";
 }
 function saveSettings() {
-  const t = Math.min(99, Math.max(1, parseInt(thresholdInput.value || "95", 10) || 95));
-  thresholdInput.value = String(t);
+  const t = Math.min(99, Math.max(1, parseInt((thresholdInput && thresholdInput.value) || "95", 10) || 95));
+  if (thresholdInput) thresholdInput.value = String(t);
   localStorage.setItem(LS_THRESH, String(t));
-  localStorage.setItem(LS_STYLE, flashStyleSel.value === "text" ? "text" : "fullscreen");
+  localStorage.setItem(LS_STYLE, (flashStyleSel && flashStyleSel.value === "text") ? "text" : "fullscreen");
 }
 loadSettings();
-thresholdInput.addEventListener("change", saveSettings);
-flashStyleSel.addEventListener("change", saveSettings);
+if (thresholdInput) thresholdInput.addEventListener("change", saveSettings);
+if (flashStyleSel) flashStyleSel.addEventListener("change", saveSettings);
 
 function getThreshold() {
-  return Math.min(99, Math.max(1, parseInt(thresholdInput.value || "95", 10) || 95));
+  const v = parseInt((thresholdInput && thresholdInput.value) || "95", 10);
+  return Math.min(99, Math.max(1, isFinite(v) ? v : 95));
 }
 function getFlashStyle() {
-  return flashStyleSel.value === "text" ? "text" : "fullscreen";
+  return (flashStyleSel && flashStyleSel.value === "text") ? "text" : "fullscreen";
 }
 
 // ---------------- Flash (Text / Fullscreen) ----------------
@@ -134,14 +136,12 @@ function colorDist(a, b) {
   return Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b);
 }
 
-// Measure progress bar fill percent using luminance drop vs empty region.
-// Uses 3 scanlines for stability.
+// Measure progress bar fill percent by scanning BELOW the tiny anchor,
+// auto-detecting whether the filled region is brighter or darker,
+// with a green-dominance fallback.
 function measureProgressPercent(img, lockX, lockY, anchorW, anchorH) {
-  const ys = [
-    Math.floor(lockY + anchorH * 0.25),
-    Math.floor(lockY + anchorH * 0.50),
-    Math.floor(lockY + anchorH * 0.75),
-  ];
+  const baseY = lockY + anchorH + 6;
+  const ys = [baseY - 2, baseY, baseY + 2, baseY + 4];
 
   let best = null;
 
@@ -152,32 +152,51 @@ function measureProgressPercent(img, lockX, lockY, anchorW, anchorH) {
     const ref = getPx(img, cx, y);
     if (!ref) continue;
 
-    // Walk outwards to find interior bounds (stop when pixel differs from interior ref)
+    // Find bar interior bounds by walking until we leave the interior-like pixels.
     let left = cx;
-    for (let i = 0; i < 800; i++) {
+    for (let i = 0; i < 900; i++) {
       const x = cx - i;
       const p = getPx(img, x, y);
-      if (!p || colorDist(p, ref) > 80) { left = x + 1; break; }
+      if (!p || colorDist(p, ref) > 95) { left = x + 1; break; }
       left = x;
     }
 
     let right = cx;
-    for (let i = 0; i < 1400; i++) {
+    for (let i = 0; i < 1600; i++) {
       const x = cx + i;
       const p = getPx(img, x, y);
-      if (!p || colorDist(p, ref) > 80) { right = x - 1; break; }
+      if (!p || colorDist(p, ref) > 95) { right = x - 1; break; }
       right = x;
     }
 
     const width = right - left + 1;
-    if (width < 100) continue;
+    if (width < 120) continue;
 
-    // Sample "empty" luminance from far right side (usually unfilled region)
-    const emptyP = getPx(img, right, y);
-    if (!emptyP) continue;
-    const emptyLum = lum(emptyP);
+    const leftP = getPx(img, Math.min(right, left + 5), y);
+    const rightP = getPx(img, Math.max(left, right - 5), y);
+    if (!leftP || !rightP) continue;
 
-    // Scan from left until luminance stops being significantly darker than empty.
+    const Lleft = lum(leftP);
+    const Lright = lum(rightP);
+
+    const delta = 12;
+    let mode = "greenFallback";
+    if (Lleft > Lright + delta) mode = "brighter";
+    else if (Lleft < Lright - delta) mode = "darker";
+
+    function looksFilled(p) {
+      if (!p) return false;
+
+      if (mode === "brighter") {
+        return lum(p) > (Lright + 8);
+      }
+      if (mode === "darker") {
+        return lum(p) < (Lright - 8);
+      }
+
+      return (p.g > 65) && (p.g > p.r + 15) && (p.g > p.b + 15);
+    }
+
     let fillX = left;
     let seenFill = false;
 
@@ -185,14 +204,12 @@ function measureProgressPercent(img, lockX, lockY, anchorW, anchorH) {
       const p = getPx(img, x, y);
       if (!p) break;
 
-      const L = lum(p);
-      const filled = (L < emptyLum - 10); // threshold
-
+      const filled = looksFilled(p);
       if (filled) {
         fillX = x;
         seenFill = true;
       } else if (seenFill && x > left + 12) {
-        break; // stop once we've passed the filled region
+        break;
       }
     }
 
@@ -304,7 +321,6 @@ async function start() {
       setLock(`x=${res.x}, y=${res.y}`);
 
       const pct = measureProgressPercent(img, res.x, res.y, anchor.width, anchor.height);
-
       if (pct == null) {
         setProgress("—");
         lastPct = null;
@@ -386,5 +402,4 @@ setStatus("Idle");
 setMode("Not running");
 setLock("none");
 setProgress("—");
-
 dbg(`ProgFlash v=${APP_V}\nReady`);
