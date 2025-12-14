@@ -14,7 +14,10 @@ const thresholdInput = document.getElementById("thresholdPct");
 const flashStyleSel  = document.getElementById("flashStyle");
 
 function setStatus(v){ statusEl.textContent = v; }
-function setMode(v){ modeEl.textContent = v; }
+function setMode(v){ modeEl.tefunction isGreenFill(c) {
+  return (c.g > 70) && (c.g > c.r + 20) && (c.g > c.b + 20);
+}
+xtContent = v; }
 function setLock(v){ lockEl.textContent = v; }
 function dbg(v){ dbgEl.textContent = String(v); }
 function setProgress(v){ progressEl.textContent = v; }
@@ -160,10 +163,67 @@ function colorDist(a, b) {
   return Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b);
 }
 
-function isGreenFill(c) {
-  // Simple “green dominance” rule.
-  return (c.g > 70) && (c.g > c.r + 20) && (c.g > c.b + 20);
+function measureProgressPercent(img, lockX, lockY, anchorW, anchorH) {
+  // Use several scanlines for robustness
+  const scanLines = [
+    Math.floor(lockY + anchorH * 0.25),
+    Math.floor(lockY + anchorH * 0.50),
+    Math.floor(lockY + anchorH * 0.75),
+  ];
+
+  let bestPct = null;
+
+  for (const scanY of scanLines) {
+    if (scanY < 0 || scanY >= img.height) continue;
+
+    const centerX = Math.min(img.width - 1, Math.max(0, lockX + Math.floor(anchorW / 2)));
+    const ref = getPx(img, centerX, scanY);
+    if (!ref) continue;
+
+    // find bar interior
+    let left = centerX;
+    let right = centerX;
+
+    for (let i = 0; i < 600; i++) {
+      const x = centerX - i;
+      const p = getPx(img, x, scanY);
+      if (!p || colorDist(p, ref) > 80) break;
+      left = x;
+    }
+
+    for (let i = 0; i < 1200; i++) {
+      const x = centerX + i;
+      const p = getPx(img, x, scanY);
+      if (!p || colorDist(p, ref) > 80) break;
+      right = x;
+    }
+
+    const width = right - left + 1;
+    if (width < 80) continue;
+
+    // Detect fill via brightness difference
+    const emptyLum = lum(getPx(img, right, scanY));
+    let fillX = left;
+
+    for (let x = left; x <= right; x++) {
+      const p = getPx(img, x, scanY);
+      if (!p) break;
+
+      // filled bar is noticeably darker than empty
+      if (lum(p) < emptyLum - 10) {
+        fillX = x;
+      } else if (x > left + 10) {
+        break;
+      }
+    }
+
+    const pct = Math.max(0, Math.min(100, ((fillX - left) / width) * 100));
+    if (bestPct == null || pct > bestPct) bestPct = pct;
+  }
+
+  return bestPct;
 }
+
 
 function measureProgressPercent(img, lockX, lockY, anchorW, anchorH) {
   // Pick a stable scanline through the anchor’s center
