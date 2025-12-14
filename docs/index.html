@@ -1,91 +1,44 @@
-<!doctype html>
-<html>
+<!DOCTYPE html>
+<html lang="en">
 <head>
-  <meta charset="utf-8" />
+  <meta charset="UTF-8" />
   <title>ProgFlash</title>
   <style>
-    body { font-family: sans-serif; margin: 12px; }
-    button { padding: 8px 10px; margin-right: 8px; }
-    .row { margin: 10px 0; }
-    .status { padding: 8px; background:#f2f2f2; border-radius: 6px; }
-    pre { white-space: pre-wrap; background:#000; color:#00ff00; padding:8px; border-radius: 6px; }
-    .err { white-space: pre-wrap; background:#fee; border:1px solid #f99; padding:8px; border-radius:6px; }
-    code { background:#eee; padding:2px 4px; border-radius:4px; }
-    label { margin-right: 10px; }
-    input[type="number"] { width: 70px; padding: 4px; }
-    select { padding: 4px; }
+    body { font-family: sans-serif; }
+    .row { margin: 4px 0; }
+    #debugBox { white-space: pre; font-family: monospace; }
   </style>
 </head>
 <body>
-  <h3>ProgFlash</h3>
+
+  <div class="row"><strong>Status:</strong> <span id="status">Idle</span></div>
+  <div class="row"><strong>Mode:</strong> <span id="mode">Not running</span></div>
+  <div class="row"><strong>Lock:</strong> <span id="lock">none</span></div>
+  <div class="row"><strong>Progress:</strong> <span id="progress">—</span></div>
+
+  <div class="row">
+    Flash at:
+    <input id="flashAt" type="number" min="1" max="100" value="95" /> %
+  </div>
+
+  <div class="row">
+    Flash style:
+    <select id="flashStyle">
+      <option value="text">Text</option>
+      <option value="fullscreen">Fullscreen</option>
+    </select>
+  </div>
 
   <div class="row">
     <button id="startBtn">Start</button>
     <button id="stopBtn" disabled>Stop</button>
-    <button id="testFlashBtn">Test flash</button>
+    <button id="testFlashBtn">Test Flash</button>
   </div>
 
-  <div class="row">
-    <label>
-      Flash at %
-      <input id="thresholdPct" type="number" min="1" max="99" step="1" value="95">
-    </label>
+  <pre id="debugBox"></pre>
 
-    <label>
-      Flash style
-      <select id="flashStyle">
-        <option value="fullscreen">Fullscreen</option>
-        <option value="text">Text</option>
-      </select>
-    </label>
-  </div>
-
-  <div class="row status">
-    <div><b>Status:</b> <span id="status">Idle</span></div>
-    <div><b>Mode:</b> <span id="mode">Not running</span></div>
-    <div><b>Lock:</b> <span id="lock">none</span></div>
-    <div><b>Progress:</b> <span id="progressPct">—</span></div>
-  </div>
-
-<div>
-  <strong>Progress:</strong>
-  <span id="progress">—</span>
-</div>
-
-
-  <div class="row">
-    <small>
-      Put <code>img/progbar_anchor.png</code> as a tiny crop of the bar’s interior.
-      Start crafting so the bar is visible, then hit <b>Start</b>.
-    </small>
-  </div>
-
-  <pre id="debugBox">Loading…</pre>
-
-  <script>
-    window.addEventListener("error", (e) => {
-      const pre = document.createElement("pre");
-      pre.className = "err";
-      pre.textContent =
-        "JS ERROR: " + (e.message || String(e.error || e)) + "\n" +
-        (e.filename ? `${e.filename}:${e.lineno}:${e.colno}\n` : "") +
-        (e.error && e.error.stack ? e.error.stack : "");
-      document.body.prepend(pre);
-    });
-
-    window.addEventListener("unhandledrejection", (e) => {
-      const pre = document.createElement("pre");
-      pre.className = "err";
-      const err = e.reason;
-      pre.textContent =
-        "PROMISE REJECTION: " + (err && err.message ? err.message : String(err)) + "\n" +
-        (err && err.stack ? err.stack : "");
-      document.body.prepend(pre);
-    });
-  </script>
-
-  <!-- IMPORTANT: matcher FIRST, then app (classic scripts, NO modules) -->
-  <script src="./matcher.js?v=3ms"></script>
-  <script src="./app.js?v=3"></script>
+  <!-- IMPORTANT: matcher first, then app -->
+  <script src="matcher.js?v=1"></script>
+  <script src="app.js?v=1"></script>
 </body>
 </html>
