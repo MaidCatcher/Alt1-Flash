@@ -1,4 +1,4 @@
-// app.js (patched: progress element safe)
+// app.js — diagnostic build (shows WHY capture fails)
 
 const statusEl = document.getElementById("status");
 const modeEl   = document.getElementById("mode");
@@ -16,29 +16,53 @@ function setLock(v){ if (lockEl) lockEl.textContent = v; }
 function setProgress(v){ if (progEl) progEl.textContent = v; }
 function dbg(v){ if (dbgEl) dbgEl.textContent = String(v); }
 
-function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
-
 let running = false;
 let loop = null;
 let anchor = null;
 
 async function start(){
   if (!window.alt1){
-    alert("Open inside Alt1");
+    setStatus("Alt1 missing");
+    dbg("Open this inside Alt1 Toolkit.");
     return;
   }
-  if (!window.captureRs || !window.findAnchor || !window.loadImage){
+
+  // show basic Alt1 state right away
+  dbg(JSON.stringify({
+    alt1: true,
+    permissionPixel: !!alt1.permissionPixel,
+    permissionOverlay: !!alt1.permissionOverlay,
+    hasGetRegion: typeof alt1.getRegion === "function",
+    rsX: alt1.rsX, rsY: alt1.rsY,
+    rsWidth: alt1.rsWidth, rsHeight: alt1.rsHeight
+  }, null, 2));
+
+  if (typeof window.captureRs !== "function" ||
+      typeof window.findAnchor !== "function" ||
+      typeof window.loadImage !== "function") {
     setStatus("matcher.js not loaded");
+    dbg("Missing globals:\n" + JSON.stringify({
+      captureRs: typeof window.captureRs,
+      findAnchor: typeof window.findAnchor,
+      loadImage: typeof window.loadImage
+    }, null, 2));
     return;
   }
 
   if (!anchor){
-    anchor = await loadImage("img/progbar_anchor.png");
+    setStatus("Loading anchor…");
+    anchor = await loadImage("img/progbar_anchor.png?v=" + Date.now());
+  }
+  if (!anchor){
+    setStatus("Anchor load failed");
+    dbg("Could not load img/progbar_anchor.png (check path + case).");
+    return;
   }
 
   running = true;
   setMode("Running");
   setStatus("Searching…");
+  setLock("none");
   setProgress("—");
 
   if (loop) clearInterval(loop);
@@ -60,15 +84,15 @@ function tick(){
 
   const img = captureRs();
   if (!img){
-    dbg("capture failed");
+    setStatus("Capture failed");
+    const d = window.progflashCaptureDiag || {};
+    dbg("captureRs(): null\n\n" + JSON.stringify(d, null, 2));
     return;
   }
 
   const res = findAnchor(img, anchor, {
-    tolerance: 80,
-    stride: 1,
-    minScore: 0.30,
-    returnBest: true
+    tolerance: 90,
+    minScore: 0.25
   });
 
   if (res && res.ok){
@@ -81,7 +105,11 @@ function tick(){
     setProgress("—");
   }
 
-  dbg(JSON.stringify(res, null, 2));
+  dbg(JSON.stringify({
+    capture: { w: img.width, h: img.height },
+    anchor: { w: anchor.width, h: anchor.height },
+    res
+  }, null, 2));
 }
 
 testBtn.onclick = () => alert("flash test");
