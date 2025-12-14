@@ -14,10 +14,7 @@ const thresholdInput = document.getElementById("thresholdPct");
 const flashStyleSel  = document.getElementById("flashStyle");
 
 function setStatus(v){ statusEl.textContent = v; }
-function setMode(v){ modeEl.tefunction isGreenFill(c) {
-  return (c.g > 70) && (c.g > c.r + 20) && (c.g > c.b + 20);
-}
-xtContent = v; }
+function setMode(v){ modeEl.textContent = v; }
 function setLock(v){ lockEl.textContent = v; }
 function dbg(v){ dbgEl.textContent = String(v); }
 function setProgress(v){ progressEl.textContent = v; }
@@ -53,8 +50,7 @@ thresholdInput.addEventListener("change", saveSettings);
 flashStyleSel.addEventListener("change", saveSettings);
 
 function getThreshold() {
-  const t = Math.min(99, Math.max(1, parseInt(thresholdInput.value || "95", 10) || 95));
-  return t;
+  return Math.min(99, Math.max(1, parseInt(thresholdInput.value || "95", 10) || 95));
 }
 
 function getFlashStyle() {
@@ -113,7 +109,7 @@ async function flashFullscreen({ cycles = 2, intervalMs = 180 } = {}) {
 
     for (let i = 0; i < cycles; i++) {
       alt1.overLaySetGroup(g);
-      // Bright white-ish flash
+      // bright white-ish flash across the RS viewport
       alt1.overLayRect(rgba(255,255,255,200), x, y, w, h, 250, 0);
       await sleep(intervalMs);
       alt1.overLayClearGroup(g);
@@ -140,13 +136,7 @@ function clearDebugOverlay() {
   alt1.overLayClearGroup("progflash_debug");
 }
 
-// ---- Progress percent detection ----
-// Using locked anchor position inside the bar.
-// Strategy:
-// 1) Find bar interior span by walking left/right until pixel color changes from "bar interior".
-// 2) Estimate fill by scanning from left edge until green dominance stops.
-// This is heuristic but works well for RS crafting bar.
-
+// ---- Progress helpers ----
 function getPx(img, x, y) {
   if (!img) return null;
   if (x < 0 || y < 0 || x >= img.width || y >= img.height) return null;
@@ -163,8 +153,9 @@ function colorDist(a, b) {
   return Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b);
 }
 
+// Robust progress % estimation using luminance difference across multiple scanlines.
+// Works better than "green dominance" on RS gradients/shine.
 function measureProgressPercent(img, lockX, lockY, anchorW, anchorH) {
-  // Use several scanlines for robustness
   const scanLines = [
     Math.floor(lockY + anchorH * 0.25),
     Math.floor(lockY + anchorH * 0.50),
@@ -180,7 +171,7 @@ function measureProgressPercent(img, lockX, lockY, anchorW, anchorH) {
     const ref = getPx(img, centerX, scanY);
     if (!ref) continue;
 
-    // find bar interior
+    // find interior bounds by walking until pixels differ from the anchor-interior reference
     let left = centerX;
     let right = centerX;
 
@@ -201,18 +192,21 @@ function measureProgressPercent(img, lockX, lockY, anchorW, anchorH) {
     const width = right - left + 1;
     if (width < 80) continue;
 
-    // Detect fill via brightness difference
-    const emptyLum = lum(getPx(img, right, scanY));
+    const emptyP = getPx(img, right, scanY);
+    if (!emptyP) continue;
+    const emptyLum = lum(emptyP);
+
+    // scan from left: filled part is usually darker than empty region
     let fillX = left;
 
     for (let x = left; x <= right; x++) {
       const p = getPx(img, x, scanY);
       if (!p) break;
 
-      // filled bar is noticeably darker than empty
       if (lum(p) < emptyLum - 10) {
         fillX = x;
       } else if (x > left + 10) {
+        // once we’ve seen non-fill beyond the initial margin, stop
         break;
       }
     }
@@ -224,71 +218,12 @@ function measureProgressPercent(img, lockX, lockY, anchorW, anchorH) {
   return bestPct;
 }
 
-
-function measureProgressPercent(img, lockX, lockY, anchorW, anchorH) {
-  // Pick a stable scanline through the anchor’s center
-  const scanY = Math.min(img.height - 1, Math.max(0, lockY + Math.floor(anchorH / 2)));
-  const centerX = Math.min(img.width - 1, Math.max(0, lockX + Math.floor(anchorW / 2)));
-
-  const ref = getPx(img, centerX, scanY);
-  if (!ref) return null;
-
-  // Walk left to find interior start
-  let left = centerX;
-  for (let i = 0; i < 600; i++) {
-    const x = centerX - i;
-    const p = getPx(img, x, scanY);
-    if (!p) break;
-    if (colorDist(p, ref) > 90) { // crossed border/outline
-      left = x + 1;
-      break;
-    }
-    left = x;
-  }
-
-  // Walk right to find interior end
-  let right = centerX;
-  for (let i = 0; i < 1200; i++) {
-    const x = centerX + i;
-    const p = getPx(img, x, scanY);
-    if (!p) break;
-    if (colorDist(p, ref) > 90) {
-      right = x - 1;
-      break;
-    }
-    right = x;
-  }
-
-  const interiorW = right - left + 1;
-  if (interiorW < 60) return null;
-
-  // Count fill from left edge until it stops being green
-  let fill = 0;
-  for (let x = left; x <= right; x++) {
-    const p = getPx(img, x, scanY);
-    if (!p) break;
-
-    // If this looks like “empty” bar, stop.
-    // We stop on first run of non-green after some green.
-    if (!isGreenFill(p)) {
-      // allow early non-green (in case left edge isn’t filled yet)
-      // but once we’ve seen some fill, stop.
-      if (fill > 10) break;
-      continue;
-    }
-    fill++;
-  }
-
-  const pct = Math.max(0, Math.min(100, (fill / interiorW) * 100));
-  return pct;
-}
-
 // ---- State ----
 let running = false;
 let loop = null;
 let anchor = null;
 
-// for threshold crossing
+// threshold crossing behavior
 let lastPct = null;
 let flashedThisCraft = false;
 
@@ -371,7 +306,7 @@ async function start() {
 
     const scoreTxt = (res && typeof res.score === "number") ? res.score.toFixed(3) : "n/a";
 
-    // Debug overlay rectangle for best match (optional)
+    // Debug overlay rectangle for best match
     if (res && res.best && alt1.permissionOverlay) {
       if (res.score >= 0.30) {
         alt1.overLaySetGroup("progflash_debug");
@@ -393,19 +328,20 @@ async function start() {
       setStatus("Locked");
       setLock(`x=${res.x}, y=${res.y}`);
 
-      // Measure progress %
       const pct = measureProgressPercent(img, res.x, res.y, anchor.width, anchor.height);
       if (pct == null) {
         setProgress("—");
+        lastPct = null;
+        flashedThisCraft = false;
       } else {
         setProgress(pct.toFixed(0) + "%");
 
-        // Reset craft trigger when it goes low again (new craft)
+        // reset for next craft once it drops low again
         if (pct <= 5) flashedThisCraft = false;
 
         const thresh = getThreshold();
 
-        // Flash when crossing threshold upward (once per craft)
+        // flash once when crossing upward over threshold
         if (!flashedThisCraft) {
           if (lastPct != null && lastPct < thresh && pct >= thresh) {
             flashedThisCraft = true;
