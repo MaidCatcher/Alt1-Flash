@@ -64,3 +64,18 @@
 
   console.log("matcher.js loaded (getRegion)");
 })();
+
+// ---- ProgFlash global exports + compatibility aliases ----
+
+// Primary exports
+window.progflashFindAnchor = progflashFindAnchor;
+window.progflashCaptureRs  = progflashCaptureRs;
+window.progflashLoadImage  = progflashLoadImage;
+
+// Compatibility aliases expected by app.js
+window.findAnchor = progflashFindAnchor;
+window.captureRs  = progflashCaptureRs;
+window.loadImage  = progflashLoadImage;
+
+// Sanity log
+console.log("matcher.js loaded (findAnchor, captureRs, loadImage ready)");
