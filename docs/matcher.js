@@ -36,7 +36,7 @@
   // ---- Anchor matching ----
   window.progflashFindAnchor = function (img, anchor, opts = {}) {
     const {
-      tolerance = 60,
+      tolerance = 50,
       minScore = 0.4
     } = opts;
 
