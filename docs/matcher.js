@@ -1,13 +1,12 @@
-// matcher.js
-// Minimal, stable matcher for Alt1 using a1lib (NO alt1.captureScreen)
+// matcher.js — Alt1-safe, getRegion-based capture
 
 (function () {
-  if (!window.alt1 || !window.a1lib) {
-    console.error("Alt1 or a1lib missing");
+  if (!window.alt1) {
+    console.error("Alt1 missing");
     return;
   }
 
-  // --- Load image helper ---
+  // ---- Image loader ----
   window.progflashLoadImage = async function (src) {
     return new Promise((resolve, reject) => {
       const img = new Image();
@@ -17,38 +16,37 @@
     });
   };
 
-  // --- Capture region helper ---
+  // ---- Capture RuneScape viewport ----
   window.progflashCaptureRs = function () {
     if (!alt1.permissionPixel) return null;
 
-    const x = alt1.rsX || 0;
-    const y = alt1.rsY || 0;
-    const w = alt1.rsWidth;
-    const h = alt1.rsHeight;
-
-    if (!w || !h) return null;
-
     try {
-      return a1lib.capture(x, y, w, h);
+      return alt1.getRegion(
+        alt1.rsX || 0,
+        alt1.rsY || 0,
+        alt1.rsWidth,
+        alt1.rsHeight
+      );
     } catch (e) {
-      console.error("capture failed", e);
+      console.error("getRegion failed", e);
       return null;
     }
   };
 
-  // --- Anchor matcher ---
+  // ---- Anchor matching ----
   window.progflashFindAnchor = function (img, anchor, opts = {}) {
     const {
       tolerance = 60,
-      minScore = 0.4,
-      returnBest = true
+      minScore = 0.4
     } = opts;
 
-    const res = a1lib.findSubimage(img, anchor, tolerance);
+    if (!img || !anchor) return { ok: false };
 
-    if (!res || !res.length) {
-      return { ok: false };
-    }
+    const res = alt1.findSubimage
+      ? alt1.findSubimage(img, anchor, tolerance)
+      : [];
+
+    if (!res || !res.length) return { ok: false };
 
     let best = res[0];
     for (const r of res) {
@@ -64,5 +62,5 @@
     };
   };
 
-  console.log("matcher.js loaded");
+  console.log("matcher.js loaded (getRegion)");
 })();
