@@ -1,29 +1,25 @@
+
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8">
   <title>ProgFlash</title>
+  <script src="https://runeapps.org/lib/a1lib.js"></script>
+  <script src="matcher.js"></script>
+  <script src="app.js"></script>
 </head>
 <body>
   <h2>ProgFlash</h2>
   <div>
-    <button id="start">Start</button>
-    <button id="stop">Stop</button>
-    <button id="testflash">Test flash</button>
-  </div>
-  <div>
-    Flash at % <input id="flashAt" value="95" size="3" />
+    <button onclick="start()">Start</button>
+    <button onclick="stop()">Stop</button>
+    <button onclick="testFlash()">Test flash</button>
+    <br>
+    Flash at % <input type="number" id="flashAt" value="95">
     Flash style <select id="flashStyle">
       <option value="text">Text</option>
       <option value="fullscreen">Fullscreen</option>
     </select>
   </div>
-  <pre>Status: <span id="status">Idle</span>
-Mode: <span id="mode">Waiting</span>
-Lock: <span id="lock">none</span>
-Progress: <span id="progress">—</span></pre>
   <pre id="log"></pre>
-  <script src="matcher.js"></script>
-  <script src="app.js"></script>
 </body>
 </html>

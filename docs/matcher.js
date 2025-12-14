@@ -1,51 +1,47 @@
-// matcher.js
 
 window.captureRs = async function () {
-  if (!window.alt1) {
-    console.log("alt1 not detected");
-    return null;
-  }
-
   try {
-    if (typeof alt1.captureScreen === "function") {
-      const img = await alt1.captureScreen(); // direct capture
-      return img;
-    } else {
-      console.error("alt1.captureScreen is not a function.");
+    const img = a1lib.captureHoldFullRs();
+    if (!img) {
+      console.warn("Image capture returned null.");
       return null;
     }
+    return img;
   } catch (e) {
-    console.error("Failed to capture screen:", e);
+    console.error("captureRs failed:", e);
     return null;
   }
 };
 
-window.loadImage = async function (path) {
-  const response = await fetch(path);
-  const blob = await response.blob();
-  const bitmap = await createImageBitmap(blob);
-  return bitmap;
-};
-
-window.findAnchor = async function (needleImg) {
-  const img = await window.captureRs();
-  if (!img) return { ok: false };
-
-  const match = img.findSubimage(needleImg, {
-    tolerance: 50,
-    debug: true,
-  });
-
-  if (match.length > 0) {
-    return {
-      ok: true,
-      x: match[0].x,
-      y: match[0].y,
-      score: match[0].score,
-    };
+window.findAnchor = async function (needleUrl) {
+  const needleImg = await loadImage(needleUrl);
+  if (!needleImg) {
+    console.warn("Needle image not loaded.");
+    return { ok: false };
   }
 
-  return { ok: false };
+  const haystack = await captureRs();
+  if (!haystack) return { ok: false };
+
+  const match = haystack.findSubimage(needleImg, { tolerance: 50 });
+  if (!match) return { ok: false };
+
+  return { ok: true, x: match.x, y: match.y };
 };
 
-console.log("matcher.js loaded (captureScreen)");
+window.loadImage = async function (url) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      const data = ctx.getImageData(0, 0, img.width, img.height);
+      resolve(new a1lib.ImageDataWrapper(data));
+    };
+    img.onerror = () => resolve(null);
+    img.src = url;
+  });
+};
