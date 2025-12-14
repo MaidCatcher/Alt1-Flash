@@ -214,7 +214,20 @@ async function start(){
     setStatus("Locked");
     setLock(`x=${res.x}, y=${res.y}`);
 
-    const raw=measureProgressPercent(img,res.x,res.y,anchor.width,anchor.height);
+    // Progress bar geometry relative to anchor
+const BAR_X_OFFSET = 14;   // pixels right of anchor
+const BAR_Y_OFFSET = 0;    // same vertical alignment
+const BAR_WIDTH    = 160;  // visible green bar width
+const BAR_HEIGHT   = 6;    // bar thickness
+
+const raw = measureProgressPercent(
+  img,
+  res.x + BAR_X_OFFSET,
+  res.y + BAR_Y_OFFSET,
+  BAR_WIDTH,
+  BAR_HEIGHT
+);
+
     if(raw==null) return;
 
     let pct=Math.round(raw); // ✅ FIXED: let, not const
