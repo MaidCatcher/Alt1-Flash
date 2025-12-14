@@ -123,7 +123,8 @@ function computeProgress(img, anchorX, anchorY) {
 // --------------------------------------------------
 
 async function start(){
-  if (!window.alt1 || !window.a1lib) {
+  if (!window.alt1) {
+
     setStatus("Alt1 or a1lib missing");
     return;
   }
