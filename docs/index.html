@@ -12,7 +12,7 @@
       white-space: pre;
       border: 1px solid #ccc;
       padding: 8px;
-      height: 420px;
+      height: 440px;
       overflow: auto;
       background: #fff;
     }
@@ -20,6 +20,7 @@
       font-size: 12px;
       opacity: 0.85;
       margin-top: 6px;
+      line-height: 1.4;
     }
     #versionBar code { font-family: Consolas, monospace; }
   </style>
@@ -32,11 +33,13 @@
     <button id="startBtn">Start</button>
     <button id="stopBtn">Stop</button>
     <button id="testFlashBtn">Test flash</button>
+    <button id="calibrateBtn" title="Hover your mouse over the progress bar and click this.">Calibrate</button>
 
     <div id="versionBar">
       Version: <code id="appVersion">unknown</code> |
       Build: <code id="appBuild">unknown</code> |
-      Loaded: <code id="loadedAt">unknown</code>
+      Loaded: <code id="loadedAt">unknown</code><br/>
+      Calibrated WIDE: <code id="calibWide">none</code>
     </div>
   </div>
 
@@ -52,15 +55,14 @@
   <!-- Cache-bust both scripts so Alt1 can't keep an old version forever -->
   <script>
     // Change APP_VERSION when you publish a new release
-    window.APP_VERSION = "0.3.2";
-    // BUILD_ID changes each edit/reload in *this* HTML file
+    window.APP_VERSION = "0.3.4";
+    // BUILD_ID changes each reload of this HTML file
     window.BUILD_ID = "build-" + Date.now();
 
     document.getElementById("appVersion").textContent = window.APP_VERSION;
     document.getElementById("appBuild").textContent = window.BUILD_ID;
     document.getElementById("loadedAt").textContent = new Date().toLocaleString();
 
-    // Dynamically load scripts with cache busters
     function loadScript(src) {
       return new Promise((resolve, reject) => {
         const s = document.createElement("script");
@@ -71,12 +73,10 @@
       });
     }
 
-    // matcher first, then app
     loadScript("matcher.js")
       .then(() => loadScript("app.js"))
       .catch(err => {
-        const dbg = document.getElementById("debugBox");
-        dbg.textContent = String(err && err.message ? err.message : err);
+        document.getElementById("debugBox").textContent = String(err && err.message ? err.message : err);
       });
   </script>
 </body>
