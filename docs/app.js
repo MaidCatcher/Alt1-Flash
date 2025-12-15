@@ -457,10 +457,22 @@ canvas.addEventListener("mouseup", (ev) => {
     return;
   }
 
-  const ax = Math.min(p1.x, p2.x);
-  const ay = Math.min(p1.y, p2.y);
-  const aw = Math.max(1, Math.abs(p2.x - p1.x));
-  const ah = Math.max(1, Math.abs(p2.y - p1.y));
+	// Raw drag rect
+	const rawX = Math.min(p1.x, p2.x);
+	const rawY = Math.min(p1.y, p2.y);
+	const rawW = Math.max(1, Math.abs(p2.x - p1.x));
+	const rawH = Math.max(1, Math.abs(p2.y - p1.y));
+
+// Trim to a recommended size anchored to the TOP-RIGHT of the selection
+const REC_W = 140;
+const REC_H = 70;
+
+// Anchor rect: take top-right corner from their selection
+const ax = Math.max(0, rawX + rawW - REC_W);
+const ay = Math.max(0, rawY);
+const aw = REC_W;
+const ah = REC_H;
+
 
   if (!lastFrame) lastFrame = captureRs();
   if (!lastFrame) {
