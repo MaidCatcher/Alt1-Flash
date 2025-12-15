@@ -1,4 +1,4 @@
-// app.js — diagnostic build with scan-region overlay + lock tracking
+// app.js — scan-region overlay + lock tracking (configurable WIDE region)
 // Requires matcher.js exposing: captureRs, findAnchor, loadImage
 
 const statusEl = document.getElementById("status");
@@ -21,18 +21,29 @@ let running = false;
 let loop = null;
 let anchor = null;
 
-// --- Scan configuration ---
-// WIDE scan: where the bar usually is (tune if needed)
+// ----------------- CONFIG -----------------
+
+// WIDE scan region: pick which edge(s) to scan.
+// Example presets:
+// - top-center-ish: set yFrom:"top", yPx:220; xFrom:"left", xPx: img.width (full width)
+// - bottom-right:  yFrom:"bottom", yPx:260; xFrom:"right", xPx:900
 const WIDE = {
-  bottomPx: 260, // scan bottom strip height
-  rightPx:  900  // scan right strip width
+  // "left" means scan starts at x=0 for width xPx
+  // "right" means scan starts at x=img.width-xPx for width xPx
+  xFrom: "right",   // "left" | "right"
+  xPx: 900,         // width of scan strip/region (px)
+
+  // "top" means scan starts at y=0 for height yPx
+  // "bottom" means scan starts at y=img.height-yPx for height yPx
+  yFrom: "bottom",  // "top" | "bottom"
+  yPx: 260          // height of scan strip/region (px)
 };
 
-// TRACK scan: when locked, search only near last position
+// TRACK scan: after lock, search only near last position
 const TRACK = {
-  padX: 220,  // padding around last X
-  padY: 140,  // padding around last Y
-  minW: 420,  // minimum tracking window size
+  padX: 220,
+  padY: 140,
+  minW: 420,
   minH: 220
 };
 
@@ -43,18 +54,18 @@ const MATCH = {
   minScoreTrack: 0.70
 };
 
-// Overlay visualization
+// Overlay drawing
 const OVERLAY = {
-  enabled: true,    // if alt1.permissionOverlay is true, draw scan region
-  thickness: 2,
-  durationMs: 600   // redraw every tick; keep it visible
+  enabled: true,
+  thickness: 2
 };
 
-// Internal lock state
+// ------------------------------------------
+
 let locked = false;
 let lastLock = { x: 0, y: 0, score: 0 };
 
-// Create a cropped "view" of an image without copying pixel buffers
+// Crop view without copying buffers
 function cropView(img, ox, oy, w, h){
   const x0 = Math.max(0, Math.min(img.width  - 1, ox));
   const y0 = Math.max(0, Math.min(img.height - 1, oy));
@@ -72,16 +83,18 @@ function cropView(img, ox, oy, w, h){
   };
 }
 
-// Compute WIDE search region within captured RS viewport
+// Compute configurable WIDE region
 function getWideRegion(img){
-  const x = Math.max(0, img.width  - WIDE.rightPx);
-  const y = Math.max(0, img.height - WIDE.bottomPx);
-  const w = img.width  - x;
-  const h = img.height - y;
+  const w = Math.max(1, Math.min(WIDE.xPx, img.width));
+  const h = Math.max(1, Math.min(WIDE.yPx, img.height));
+
+  const x = (WIDE.xFrom === "right") ? Math.max(0, img.width - w) : 0;
+  const y = (WIDE.yFrom === "bottom") ? Math.max(0, img.height - h) : 0;
+
   return { x, y, w, h, mode: "WIDE" };
 }
 
-// Compute TRACK region around lastLock (within captured RS viewport)
+// Compute TRACK region around last lock
 function getTrackRegion(img){
   const desiredW = Math.max(TRACK.minW, TRACK.padX * 2);
   const desiredH = Math.max(TRACK.minH, TRACK.padY * 2);
@@ -89,57 +102,45 @@ function getTrackRegion(img){
   let x = Math.floor(lastLock.x - desiredW / 2);
   let y = Math.floor(lastLock.y - desiredH / 2);
 
-  // clamp to viewport
   x = Math.max(0, Math.min(img.width  - 1, x));
   y = Math.max(0, Math.min(img.height - 1, y));
 
   let w = Math.min(desiredW, img.width  - x);
   let h = Math.min(desiredH, img.height - y);
 
-  // ensure >= 1
   w = Math.max(1, w);
   h = Math.max(1, h);
 
   return { x, y, w, h, mode: "TRACK" };
 }
 
-// Draw a rectangle on the RS client showing scan area
+// Correct Alt1 overlay call order + throttling
 let lastOverlayDraw = 0;
-
 function drawScanOverlay(region){
   if (!OVERLAY.enabled) return;
   if (!window.alt1) return;
   if (!alt1.permissionOverlay) return;
 
-  // Throttle overlay drawing so it doesn't spam the compositor
   const now = Date.now();
   if (now - lastOverlayDraw < 700) return;
   lastOverlayDraw = now;
 
-  // region is in CAPTURE coords (within RS viewport)
   const sx = (alt1.rsX || 0) + region.x;
   const sy = (alt1.rsY || 0) + region.y;
 
-  // Alt1 expects "8bpp rgba int" – the help page calls it that.
-  // We'll use ARGB-style constants commonly used in Alt1 examples.
   const color = region.mode === "TRACK" ? 0xA0FFAA00 : 0xA000FF00;
 
   try {
     if (typeof alt1.overLayRect === "function") {
-      // ✅ Correct parameter order per Alt1 help output:
-      // overLayRect(color, x, y, w, h, time, lineWidth) :contentReference[oaicite:2]{index=2}
+      // overLayRect(color, x, y, w, h, time, lineWidth)
       alt1.overLayRect(color, sx, sy, region.w, region.h, 900, OVERLAY.thickness);
     }
-
     if (typeof alt1.overLayText === "function") {
-      // overLayText(str, color, size, x, y, time) :contentReference[oaicite:3]{index=3}
+      // overLayText(str, color, size, x, y, time)
       alt1.overLayText(region.mode, color, 14, sx + 6, sy + 6, 900);
     }
-  } catch (_) {
-    // ignore overlay failures
-  }
+  } catch (_) {}
 }
-
 
 async function start(){
   if (!window.alt1){
@@ -147,15 +148,6 @@ async function start(){
     dbg("Open this inside Alt1 Toolkit.");
     return;
   }
-
-  dbg(JSON.stringify({
-    alt1: true,
-    permissionPixel: !!alt1.permissionPixel,
-    permissionOverlay: !!alt1.permissionOverlay,
-    hasGetRegion: typeof alt1.getRegion === "function",
-    rsX: alt1.rsX, rsY: alt1.rsY,
-    rsWidth: alt1.rsWidth, rsHeight: alt1.rsHeight
-  }, null, 2));
 
   if (typeof window.captureRs !== "function" ||
       typeof window.findAnchor !== "function" ||
@@ -171,7 +163,6 @@ async function start(){
 
   if (!anchor){
     setStatus("Loading anchor…");
-    // ✅ FIX: use your real filename
     anchor = await loadImage("img/progbar_anchor.png?v=" + Date.now());
   }
   if (!anchor){
@@ -237,13 +228,15 @@ function tick(){
 
   if (locked) {
     region = getTrackRegion(img);
-    drawScanOverlay(region);
+    drawScanOverlay(region); // safe (throttled)
 
     result = runMatch(img, region, MATCH.minScoreTrack);
 
     if (!result.ok) {
+      // reacquire in WIDE
       const wide = getWideRegion(img);
-      drawScanOverlay(wide);
+      // IMPORTANT: do NOT spam overlay while searching; only draw WIDE if you want:
+      // drawScanOverlay(wide);
       const reacq = runMatch(img, wide, MATCH.minScoreWide);
 
       if (reacq.ok) {
@@ -255,9 +248,8 @@ function tick(){
     }
   } else {
     region = getWideRegion(img);
-	if (locked) drawScanOverlay(region);
-	result = runMatch(img, region, MATCH.minScoreWide);
-
+    // no overlay here to keep it stable for everyone
+    result = runMatch(img, region, MATCH.minScoreWide);
   }
 
   if (result.ok){
@@ -282,7 +274,7 @@ function tick(){
     setProgress("—");
 
     dbg(JSON.stringify({
-      scanMode: locked ? "TRACK (lost)" : region.mode,
+      scanMode: region.mode,
       capture: { w: img.width, h: img.height },
       scanRegion: { x: region.x, y: region.y, w: region.w, h: region.h },
       anchor: { w: anchor.width, h: anchor.height },
