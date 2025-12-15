@@ -1,9 +1,9 @@
 // matcher.js — Alt1 only, NO a1lib
 // Exposes: loadImage, captureRs, findAnchor
 // Works with either alt1.getRegionImage OR alt1.getRegion (base64 ARGB)
+// Adds: returnSecond => also returns secondScore (uniqueness)
 
 (function () {
-  // Public diagnostic object used by app.js when capture fails
   window.progflashCaptureDiag = {};
 
   function setDiag(patch) {
@@ -29,13 +29,11 @@
   }
 
   function base64ToBytes(b64) {
-    // Prefer modern fast API if present
     try {
       if (typeof Uint8Array.fromBase64 === "function") {
         return Uint8Array.fromBase64(b64);
       }
     } catch (_) {}
-
     const bin = atob(b64);
     const out = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i) & 255;
@@ -43,8 +41,6 @@
   }
 
   function argbToRgbaBytes(argbBytes) {
-    // alt1.getRegion returns ARGB byte order: A,R,G,B repeating.
-    // Convert to RGBA for canvas-like usage.
     const out = new Uint8ClampedArray(argbBytes.length);
     for (let i = 0; i < argbBytes.length; i += 4) {
       const A = argbBytes[i + 0];
@@ -59,7 +55,6 @@
     return out;
   }
 
-  // ---- Load anchor image (from your app folder) ----
   window.loadImage = function (src) {
     return new Promise(resolve => {
       const img = new Image();
@@ -77,19 +72,12 @@
     });
   };
 
-  // ---- Capture RS viewport ----
   window.captureRs = function () {
     try {
       setDiag({ when: new Date().toISOString(), stage: "start" });
 
-      if (!window.alt1) {
-        setDiag({ stage: "no_alt1" });
-        return null;
-      }
-      if (!alt1.permissionPixel) {
-        setDiag({ stage: "no_pixel_permission", permissionPixel: !!alt1.permissionPixel });
-        return null;
-      }
+      if (!window.alt1) { setDiag({ stage: "no_alt1" }); return null; }
+      if (!alt1.permissionPixel) { setDiag({ stage: "no_pixel_permission", permissionPixel: !!alt1.permissionPixel }); return null; }
 
       const w = alt1.rsWidth;
       const h = alt1.rsHeight;
@@ -104,27 +92,16 @@
         maxtransfer: alt1.maxtransfer
       });
 
-      if (!w || !h) {
-        setDiag({ stage: "bad_dims" });
-        return null;
-      }
+      if (!w || !h) { setDiag({ stage: "bad_dims" }); return null; }
 
-      // Preferred: getRegionImage if available
       if (typeof alt1.getRegionImage === "function") {
         const img = alt1.getRegionImage(x, y, w, h);
-        if (!img || !img.data) {
-          setDiag({ stage: "getRegionImage_failed", got: !!img });
-          return null;
-        }
+        if (!img || !img.data) { setDiag({ stage: "getRegionImage_failed", got: !!img }); return null; }
         setDiag({ stage: "ok_getRegionImage" });
         return wrapImageData(img);
       }
 
-      // Fallback: documented getRegion (base64 ARGB)
-      if (typeof alt1.getRegion !== "function") {
-        setDiag({ stage: "no_getRegion_api" });
-        return null;
-      }
+      if (typeof alt1.getRegion !== "function") { setDiag({ stage: "no_getRegion_api" }); return null; }
 
       const approxBytes = w * h * 4;
       if (alt1.maxtransfer && approxBytes > alt1.maxtransfer * 0.95) {
@@ -133,24 +110,16 @@
       }
 
       const b64 = alt1.getRegion(x, y, w, h);
-      if (!b64 || typeof b64 !== "string") {
-        setDiag({ stage: "getRegion_returned_empty", type: typeof b64 });
-        return null;
-      }
+      if (!b64 || typeof b64 !== "string") { setDiag({ stage: "getRegion_returned_empty", type: typeof b64 }); return null; }
 
       const argbBytes = base64ToBytes(b64);
       if (!argbBytes || argbBytes.length !== w * h * 4) {
-        setDiag({
-          stage: "decode_length_mismatch",
-          gotLen: argbBytes ? argbBytes.length : null,
-          expectedLen: w * h * 4
-        });
+        setDiag({ stage: "decode_length_mismatch", gotLen: argbBytes ? argbBytes.length : null, expectedLen: w * h * 4 });
         return null;
       }
 
       const rgbaBytes = argbToRgbaBytes(argbBytes);
       setDiag({ stage: "ok_getRegion" });
-
       return wrapImageData({ width: w, height: h, data: rgbaBytes });
     } catch (e) {
       console.error("captureRs failed:", e);
@@ -159,25 +128,27 @@
     }
   };
 
-  // ---- Anchor matcher ----
   // opts:
   // - tolerance (default 80)
   // - minScore (default 0.25)
   // - step (default 2)
   // - ignoreAlphaBelow (default 200)
+  // - returnSecond (default false): also returns secondScore
   window.findAnchor = function (hay, needle, opts = {}) {
-    if (!hay || !needle) return { ok: false, score: 0 };
+    if (!hay || !needle) return { ok: false, score: 0, secondScore: 0 };
 
     const tol = opts.tolerance ?? 80;
     const minScore = opts.minScore ?? 0.25;
     const step = Math.max(1, opts.step ?? 2);
     const ignoreAlphaBelow = opts.ignoreAlphaBelow ?? 200;
+    const returnSecond = !!opts.returnSecond;
 
     let best = { score: 0, x: 0, y: 0 };
+    let secondScore = 0;
 
     const maxY = hay.height - needle.height;
     const maxX = hay.width - needle.width;
-    if (maxX < 0 || maxY < 0) return { ok: false, score: 0 };
+    if (maxX < 0 || maxY < 0) return { ok: false, score: 0, secondScore: 0 };
 
     for (let y = 0; y <= maxY; y++) {
       for (let x = 0; x <= maxX; x++) {
@@ -204,14 +175,21 @@
         if (total === 0) continue;
 
         const score = good / total;
-        if (score > best.score) best = { score, x, y };
+
+        if (score > best.score) {
+          if (returnSecond) secondScore = Math.max(secondScore, best.score);
+          best = { score, x, y };
+        } else if (returnSecond && score > secondScore) {
+          secondScore = score;
+        }
       }
     }
 
-    return best.score >= minScore
-      ? { ok: true, x: best.x, y: best.y, score: best.score }
-      : { ok: false, score: best.score };
+    const ok = best.score >= minScore;
+    return returnSecond
+      ? { ok, x: best.x, y: best.y, score: best.score, secondScore }
+      : { ok, x: best.x, y: best.y, score: best.score };
   };
 
-  console.log("matcher.js loaded (getRegionImage + getRegion fallback)");
+  console.log("matcher.js loaded (capture ok + secondScore)");
 })();

@@ -39,7 +39,21 @@
     #hint {
       font-size: 12px;
       margin-top: 6px;
-      opacity: 0.85;
+      opacity: 0.9;
+      line-height: 1.35;
+    }
+    #qualityLine {
+      font-size: 12px;
+      margin-top: 6px;
+      padding: 6px 8px;
+      border: 1px solid #ddd;
+      background: #fff;
+      line-height: 1.35;
+    }
+    #qualityLine code { font-family: Consolas, monospace; }
+    #suggestion {
+      margin-top: 4px;
+      opacity: 0.9;
     }
   </style>
 </head>
@@ -51,7 +65,7 @@
     <button id="startBtn">Start</button>
     <button id="stopBtn">Stop</button>
     <button id="testFlashBtn">Test flash</button>
-    <button id="calibrateBtn" title="Click once to arm, then click on the preview where the progress bar is.">Calibrate</button>
+    <button id="calibrateBtn" title="Click to arm, then drag a box on the preview around the progress window corner.">Calibrate</button>
 
     <div id="versionBar">
       Version: <code id="appVersion">unknown</code> |
@@ -72,17 +86,24 @@
   <div id="previewWrap">
     <div id="previewTitle">Capture preview (scan region is drawn here)</div>
     <canvas id="previewCanvas" width="340" height="180"></canvas>
+
+    <div id="qualityLine">
+      Anchor quality: <code id="qualityScore">—</code>
+      <span id="qualityDetail"></span>
+      <div id="suggestion">Suggestion: <span id="suggestionText">—</span></div>
+    </div>
+
     <div id="hint">
-      Tip: Click <b>Calibrate</b>, then click on this preview where the progress bar is. That sets the search box.
+      Click <b>Calibrate</b>, then <b>drag a box</b> tightly around the <b>top-right corner</b> of the progress window
+      (include the red X + some surrounding frame/texture). Bigger than the X alone.
     </div>
   </div>
 
   <div style="margin-top:10px;"><b>Debug</b></div>
   <pre id="debugBox"></pre>
 
-  <!-- Cache-bust scripts so Alt1 can't stick on old versions -->
   <script>
-    window.APP_VERSION = "0.3.9";
+    window.APP_VERSION = "0.4.0";
     window.BUILD_ID = "build-" + Date.now();
 
     document.getElementById("appVersion").textContent = window.APP_VERSION;
