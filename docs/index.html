@@ -8,9 +8,6 @@
     body { font-family: Arial, sans-serif; margin: 12px; }
     .row { margin-bottom: 10px; }
     button { margin-right: 6px; }
-    label { font-size: 12px; margin-right: 10px; }
-    input[type="range"] { vertical-align: middle; }
-
     #debugBox {
       white-space: pre;
       border: 1px solid #ccc;
@@ -19,7 +16,6 @@
       overflow: auto;
       background: #fff;
     }
-
     #versionBar {
       font-size: 12px;
       opacity: 0.85;
@@ -27,7 +23,6 @@
       line-height: 1.4;
     }
     #versionBar code { font-family: Consolas, monospace; }
-
     #previewWrap {
       margin-top: 10px;
       border: 1px solid #ccc;
@@ -35,41 +30,18 @@
       background: #fafafa;
     }
     #previewTitle { font-size: 12px; margin-bottom: 6px; opacity: 0.85; }
-
     #previewCanvas {
       border: 1px solid #999;
       background: #000;
       image-rendering: pixelated;
       display: block;
-      cursor: crosshair;
     }
-
     #hint {
       font-size: 12px;
       margin-top: 6px;
       opacity: 0.9;
       line-height: 1.35;
     }
-
-    #qualityLine {
-      font-size: 12px;
-      margin-top: 6px;
-      padding: 6px 8px;
-      border: 1px solid #ddd;
-      background: #fff;
-      line-height: 1.35;
-    }
-    #qualityLine code { font-family: Consolas, monospace; }
-    #suggestion { margin-top: 4px; opacity: 0.9; }
-
-    #viewControls {
-      margin-top: 6px;
-      display: flex;
-      gap: 12px;
-      align-items: center;
-      flex-wrap: wrap;
-    }
-    #viewControls code { font-family: Consolas, monospace; }
   </style>
 </head>
 
@@ -79,18 +51,15 @@
   <div class="row">
     <button id="startBtn">Start</button>
     <button id="stopBtn">Stop</button>
+    <button id="autoFindBtn" title="Scan for the progress window and save its position.">Auto find</button>
+    <button id="clearLockBtn" title="Forget the saved lock position.">Clear lock</button>
     <button id="testFlashBtn">Test flash</button>
-    <button id="calibrateBtn" title="Auto-freezes. Then drag a box on the zoomable preview.">Calibrate</button>
-    <button id="freezeBtn" title="Freeze/unfreeze the preview frame.">Freeze</button>
-    <button id="resetViewBtn" title="Reset zoom/pan.">Reset view</button>
 
     <div id="versionBar">
       Version: <code id="appVersion">unknown</code> |
       Build: <code id="appBuild">unknown</code> |
       Loaded: <code id="loadedAt">unknown</code><br/>
-      Calibrated WIDE: <code id="calibWide">none</code> |
-      Calibrate mode: <code id="calibMode">off</code> |
-      Frame: <code id="frameMode">live</code>
+      Saved lock: <code id="savedLock">none</code>
     </div>
   </div>
 
@@ -102,29 +71,10 @@
   </div>
 
   <div id="previewWrap">
-    <div id="previewTitle">Capture preview (scan region is drawn here)</div>
-
-    <!-- Bigger canvas so you can actually work -->
+    <div id="previewTitle">Capture preview (scan/verify region)</div>
     <canvas id="previewCanvas" width="520" height="320"></canvas>
-
-    <div id="viewControls">
-      <label>
-        Zoom:
-        <input id="zoomSlider" type="range" min="1" max="4" step="0.25" value="1" />
-        <code id="zoomLabel">1.00×</code>
-      </label>
-      <span>Pan: right-drag or hold <code>Space</code> + drag</span>
-    </div>
-
-    <div id="qualityLine">
-      Anchor quality: <code id="qualityScore">—</code>
-      <span id="qualityDetail"></span>
-      <div id="suggestion">Suggestion: <span id="suggestionText">—</span></div>
-    </div>
-
     <div id="hint">
-      Calibrate freezes the frame so it’s smooth. Then zoom in and drag a tight box around stable frame/texture/borders.
-      Avoid dynamic text and the moving green fill.
+      Goal: Auto-find once, save the position, then stop scanning. Use <b>Auto find</b> if it ever needs re-finding.
     </div>
   </div>
 
@@ -132,7 +82,7 @@
   <pre id="debugBox"></pre>
 
   <script>
-    window.APP_VERSION = "0.4.7";
+    window.APP_VERSION = "0.5.0";
     window.BUILD_ID = "build-" + Date.now();
 
     document.getElementById("appVersion").textContent = window.APP_VERSION;
