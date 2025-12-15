@@ -1,7 +1,6 @@
 // matcher.js — Alt1 only, NO a1lib
 // Exposes: loadImage, captureRs, captureRegion, findAnchor
-// Works with either alt1.getRegionImage OR alt1.getRegion (base64 ARGB)
-// findAnchor supports returnSecond for quality scoring.
+// findAnchor supports returnSecond and secondMinDist to compute "2nd best" away from best.
 
 (function () {
   window.progflashCaptureDiag = {};
@@ -90,7 +89,6 @@
   }
 
   // Capture a region in RS capture space (fast path used by app.js)
-  // Returns wrapped image and includes _offsetX/_offsetY for mapping to RS coords.
   window.captureRegion = function (x, y, w, h) {
     try {
       setDiag({ when: new Date().toISOString(), stage: "captureRegion_start" });
@@ -115,7 +113,6 @@
         maxtransfer: alt1.maxtransfer
       });
 
-      // Preferred
       if (typeof alt1.getRegionImage === "function") {
         const img = alt1.getRegionImage(sx, sy, rr.w, rr.h);
         if (!img || !img.data) { setDiag({ stage: "getRegionImage_failed" }); return null; }
@@ -126,7 +123,6 @@
         return wrapped;
       }
 
-      // Fallback
       if (typeof alt1.getRegion !== "function") { setDiag({ stage: "no_getRegion_api" }); return null; }
 
       const approxBytes = rr.w * rr.h * 4;
@@ -157,7 +153,6 @@
     }
   };
 
-  // Full RS capture (keep for debug, but app.js should no longer use this per-tick)
   window.captureRs = function () {
     try {
       if (!window.alt1 || !alt1.permissionPixel) return null;
@@ -168,7 +163,13 @@
     }
   };
 
-  // opts: tolerance, minScore, step, ignoreAlphaBelow, returnSecond
+  // opts:
+  // - tolerance (default 80)
+  // - minScore (default 0.25)
+  // - step (default 2)
+  // - ignoreAlphaBelow (default 200)
+  // - returnSecond (default false): also returns secondScore
+  // - secondMinDist (default 30): second score must be at least this far from best match
   window.findAnchor = function (hay, needle, opts = {}) {
     if (!hay || !needle) return { ok: false, score: 0, secondScore: 0 };
 
@@ -177,6 +178,7 @@
     const step = Math.max(1, opts.step ?? 2);
     const ignoreAlphaBelow = opts.ignoreAlphaBelow ?? 200;
     const returnSecond = !!opts.returnSecond;
+    const secondMinDist = Math.max(0, opts.secondMinDist ?? 30);
 
     let best = { score: 0, x: 0, y: 0 };
     let secondScore = 0;
@@ -185,6 +187,7 @@
     const maxX = hay.width - needle.width;
     if (maxX < 0 || maxY < 0) return { ok: false, score: 0, secondScore: 0 };
 
+    // Pass 1: find best
     for (let y = 0; y <= maxY; y++) {
       for (let x = 0; x <= maxX; x++) {
         let good = 0, total = 0;
@@ -210,21 +213,52 @@
         if (total === 0) continue;
 
         const score = good / total;
-
-        if (score > best.score) {
-          if (returnSecond) secondScore = Math.max(secondScore, best.score);
-          best = { score, x, y };
-        } else if (returnSecond && score > secondScore) {
-          secondScore = score;
-        }
+        if (score > best.score) best = { score, x, y };
       }
     }
 
-    const ok = best.score >= minScore;
-    return returnSecond
-      ? { ok, x: best.x, y: best.y, score: best.score, secondScore }
-      : { ok, x: best.x, y: best.y, score: best.score };
+    if (!returnSecond) {
+      return { ok: best.score >= minScore, x: best.x, y: best.y, score: best.score };
+    }
+
+    // Pass 2: find second-best away from best
+    const minDist2 = secondMinDist * secondMinDist;
+
+    for (let y = 0; y <= maxY; y++) {
+      for (let x = 0; x <= maxX; x++) {
+        const dx = x - best.x;
+        const dy = y - best.y;
+        if ((dx * dx + dy * dy) < minDist2) continue; // ignore near-best region
+
+        let good = 0, total = 0;
+
+        for (let ny = 0; ny < needle.height; ny += step) {
+          for (let nx = 0; nx < needle.width; nx += step) {
+            const a = needle.getPixel(nx, ny);
+            const aa = (a >>> 24) & 255;
+            if (aa < ignoreAlphaBelow) continue;
+
+            total++;
+
+            const b = hay.getPixel(x + nx, y + ny);
+
+            const dr = Math.abs((a & 255) - (b & 255));
+            const dg = Math.abs(((a >> 8) & 255) - ((b >> 8) & 255));
+            const db = Math.abs(((a >> 16) & 255) - ((b >> 16) & 255));
+
+            if (dr <= tol && dg <= tol && db <= tol) good++;
+          }
+        }
+
+        if (total === 0) continue;
+
+        const score = good / total;
+        if (score > secondScore) secondScore = score;
+      }
+    }
+
+    return { ok: best.score >= minScore, x: best.x, y: best.y, score: best.score, secondScore };
   };
 
-  console.log("matcher.js loaded (captureRegion enabled)");
+  console.log("matcher.js loaded (secondMinDist uniqueness)");
 })();
