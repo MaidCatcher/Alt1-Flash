@@ -1,5 +1,4 @@
-// app.js — scan-region overlay + lock tracking (configurable WIDE region)
-// Requires matcher.js exposing: captureRs, findAnchor, loadImage
+// app.js — scan-region overlay + lock tracking + visible version/build
 
 const statusEl = document.getElementById("status");
 const modeEl   = document.getElementById("mode");
@@ -17,29 +16,21 @@ function setLock(v){ if (lockEl) lockEl.textContent = v; }
 function setProgress(v){ if (progEl) progEl.textContent = v; }
 function dbg(v){ if (dbgEl) dbgEl.textContent = String(v); }
 
+const APP_VERSION = window.APP_VERSION || "unknown";
+const BUILD_ID = window.BUILD_ID || "unknown";
+
 let running = false;
 let loop = null;
 let anchor = null;
 
-// ----------------- CONFIG -----------------
-
-// WIDE scan region: pick which edge(s) to scan.
-// Example presets:
-// - top-center-ish: set yFrom:"top", yPx:220; xFrom:"left", xPx: img.width (full width)
-// - bottom-right:  yFrom:"bottom", yPx:260; xFrom:"right", xPx:900
+// WIDE region (set these how you want)
 const WIDE = {
-  // "left" means scan starts at x=0 for width xPx
-  // "right" means scan starts at x=img.width-xPx for width xPx
   xFrom: "right",   // "left" | "right"
-  xPx: 900,         // width of scan strip/region (px)
-
-  // "top" means scan starts at y=0 for height yPx
-  // "bottom" means scan starts at y=img.height-yPx for height yPx
+  xPx: 900,
   yFrom: "bottom",  // "top" | "bottom"
-  yPx: 260          // height of scan strip/region (px)
+  yPx: 260
 };
 
-// TRACK scan: after lock, search only near last position
 const TRACK = {
   padX: 220,
   padY: 140,
@@ -47,20 +38,16 @@ const TRACK = {
   minH: 220
 };
 
-// Matcher thresholds
 const MATCH = {
   tolerance: 65,
   minScoreWide: 0.65,
   minScoreTrack: 0.70
 };
 
-// Overlay drawing
 const OVERLAY = {
   enabled: true,
   thickness: 2
 };
-
-// ------------------------------------------
 
 let locked = false;
 let lastLock = { x: 0, y: 0, score: 0 };
@@ -83,7 +70,6 @@ function cropView(img, ox, oy, w, h){
   };
 }
 
-// Compute configurable WIDE region
 function getWideRegion(img){
   const w = Math.max(1, Math.min(WIDE.xPx, img.width));
   const h = Math.max(1, Math.min(WIDE.yPx, img.height));
@@ -94,7 +80,6 @@ function getWideRegion(img){
   return { x, y, w, h, mode: "WIDE" };
 }
 
-// Compute TRACK region around last lock
 function getTrackRegion(img){
   const desiredW = Math.max(TRACK.minW, TRACK.padX * 2);
   const desiredH = Math.max(TRACK.minH, TRACK.padY * 2);
@@ -132,11 +117,9 @@ function drawScanOverlay(region){
 
   try {
     if (typeof alt1.overLayRect === "function") {
-      // overLayRect(color, x, y, w, h, time, lineWidth)
       alt1.overLayRect(color, sx, sy, region.w, region.h, 900, OVERLAY.thickness);
     }
     if (typeof alt1.overLayText === "function") {
-      // overLayText(str, color, size, x, y, time)
       alt1.overLayText(region.mode, color, 14, sx + 6, sy + 6, 900);
     }
   } catch (_) {}
@@ -163,7 +146,7 @@ async function start(){
 
   if (!anchor){
     setStatus("Loading anchor…");
-    anchor = await loadImage("img/progbar_anchor.png?v=" + Date.now());
+    anchor = await loadImage("img/progbar_anchor.png?v=" + encodeURIComponent(BUILD_ID));
   }
   if (!anchor){
     setStatus("Anchor load failed");
@@ -228,15 +211,12 @@ function tick(){
 
   if (locked) {
     region = getTrackRegion(img);
-    drawScanOverlay(region); // safe (throttled)
+    drawScanOverlay(region);
 
     result = runMatch(img, region, MATCH.minScoreTrack);
 
     if (!result.ok) {
-      // reacquire in WIDE
       const wide = getWideRegion(img);
-      // IMPORTANT: do NOT spam overlay while searching; only draw WIDE if you want:
-      // drawScanOverlay(wide);
       const reacq = runMatch(img, wide, MATCH.minScoreWide);
 
       if (reacq.ok) {
@@ -248,7 +228,7 @@ function tick(){
     }
   } else {
     region = getWideRegion(img);
-    // no overlay here to keep it stable for everyone
+    // No overlay while searching (more stable for everyone)
     result = runMatch(img, region, MATCH.minScoreWide);
   }
 
@@ -261,12 +241,12 @@ function tick(){
     setProgress("locked");
 
     dbg(JSON.stringify({
+      app: { version: APP_VERSION, build: BUILD_ID },
       scanMode: region.mode,
       capture: { w: img.width, h: img.height },
       scanRegion: { x: region.x, y: region.y, w: region.w, h: region.h },
       anchor: { w: anchor.width, h: anchor.height },
-      res: { ok: true, x: result.x, y: result.y, score: result.score },
-      tracking: { lastX: lastLock.x, lastY: lastLock.y, lastScore: lastLock.score }
+      res: { ok: true, x: result.x, y: result.y, score: result.score }
     }, null, 2));
   } else {
     setStatus("Searching…");
@@ -274,6 +254,7 @@ function tick(){
     setProgress("—");
 
     dbg(JSON.stringify({
+      app: { version: APP_VERSION, build: BUILD_ID },
       scanMode: region.mode,
       capture: { w: img.width, h: img.height },
       scanRegion: { x: region.x, y: region.y, w: region.w, h: region.h },
@@ -291,3 +272,6 @@ setStatus("Idle");
 setMode("Not running");
 setLock("none");
 setProgress("—");
+
+// Show version immediately in debug too
+dbg(JSON.stringify({ app: { version: APP_VERSION, build: BUILD_ID } }, null, 2));
