@@ -136,10 +136,10 @@ function findInImage(hay, needle, opts){
 const STAGE1 = {
   tileW: 640,
   tileH: 360,
-  step: 5,
-  tolerance: 95,
-  minScore: 0.55,
-  earlyScore: 0.86
+  step: 4,          // a little finer than 5
+  tolerance: 105,   // more forgiving for lighting
+  minScore: 0.48,   // easier to "seed"
+  earlyScore: 0.82
 };
 
 const STAGE2 = {
@@ -315,36 +315,62 @@ function stage1FindHourglass(){
   const rs = getRsSize();
   if (!rs.w || !rs.h) return null;
 
+  // Scan order: top half first, then bottom half
+  const halves = [
+    { name: "TOP",    y0: 0,               y1: Math.floor(rs.h / 2) },
+    { name: "BOTTOM", y0: Math.floor(rs.h / 2), y1: rs.h }
+  ];
+
   let best = null;
 
-  for (let ty = 0; ty < rs.h; ty += STAGE1.tileH) {
-    for (let tx = 0; tx < rs.w; tx += STAGE1.tileW) {
-      const w = Math.min(STAGE1.tileW, rs.w - tx);
-      const h = Math.min(STAGE1.tileH, rs.h - ty);
+  for (const half of halves) {
+    let tileIndex = 0;
 
-      const cap = captureRect({ x: tx, y: ty, w, h });
-      if (!cap.img) continue;
+    for (let ty = half.y0; ty < half.y1; ty += STAGE1.tileH) {
+      for (let tx = 0; tx < rs.w; tx += STAGE1.tileW) {
+        tileIndex++;
 
-      const m = findInImage(cap.img, tplHourglass, {
-        tolerance: STAGE1.tolerance,
-        minScore: 0.01,
-        step: STAGE1.step,
-        ignoreAlphaBelow: 200,
-        acceptScore: STAGE1.minScore
-      });
+        const w = Math.min(STAGE1.tileW, rs.w - tx);
+        const h = Math.min(STAGE1.tileH, half.y1 - ty);
 
-      drawRegionPreview(cap.img, `STAGE1 tile (${tx},${ty})`, m.ok ? { x:m.x, y:m.y } : null, tplHourglass);
+        const cap = captureRect({ x: tx, y: ty, w, h });
+        if (!cap.img) continue;
 
-      if (m.ok) {
-        const absX = tx + m.x;
-        const absY = ty + m.y;
-        best = { absX, absY, score: m.score };
-        if (m.score >= STAGE1.earlyScore) return best;
+        const m = findInImage(cap.img, tplHourglass, {
+          tolerance: STAGE1.tolerance,
+          minScore: 0.01,
+          step: STAGE1.step,
+          ignoreAlphaBelow: 140,          // <-- IMPORTANT: more forgiving on glow/alpha
+          acceptScore: STAGE1.minScore
+        });
+
+        // Show EXACTLY what we're scanning
+        drawRegionPreview(
+          cap.img,
+          `STAGE1 ${half.name} tile#${tileIndex} (${tx},${ty})`,
+          m.ok ? { x:m.x, y:m.y } : null,
+          tplHourglass
+        );
+
+        if (m.ok) {
+          const absX = tx + m.x;
+          const absY = ty + m.y;
+          best = { absX, absY, score: m.score, half: half.name };
+
+          // Early exit if it's a very strong match
+          if (m.score >= STAGE1.earlyScore) return best;
+        }
       }
     }
+
+    // If we got any result in top half, prefer it over scanning bottom half
+    // (You can remove this if you want best-of-both-halves.)
+    if (best && best.half === "TOP") return best;
   }
+
   return best;
 }
+
 
 // --- Stage 2: local scan for X-corner near stage1 hit ---
 function stage2FindXCornerNear(seedAbsX, seedAbsY){
@@ -396,10 +422,12 @@ function runAutoFindOnce(){
 
     const s1 = stage1FindHourglass();
     if (!s1) {
-      setStatus("Auto-find failed (no hourglass)");
-      dbg(JSON.stringify({ stage1: "fail" }, null, 2));
-      return;
-    }
+  setStatus("Auto-find: not found yet (retrying)...");
+  dbg(JSON.stringify({ stage1: "fail", note: "Will retry in 600ms" }, null, 2));
+  schedule(600, runAutoFindOnce);
+  return;
+}
+
 
     setStatus(`Stage 1 found (score ${s1.score.toFixed(2)}). Stage 2…`);
 
