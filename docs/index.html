@@ -8,6 +8,9 @@
     body { font-family: Arial, sans-serif; margin: 12px; }
     .row { margin-bottom: 10px; }
     button { margin-right: 6px; }
+    label { font-size: 12px; margin-right: 10px; }
+    input[type="range"] { vertical-align: middle; }
+
     #debugBox {
       white-space: pre;
       border: 1px solid #ccc;
@@ -16,6 +19,7 @@
       overflow: auto;
       background: #fff;
     }
+
     #versionBar {
       font-size: 12px;
       opacity: 0.85;
@@ -23,6 +27,7 @@
       line-height: 1.4;
     }
     #versionBar code { font-family: Consolas, monospace; }
+
     #previewWrap {
       margin-top: 10px;
       border: 1px solid #ccc;
@@ -30,18 +35,22 @@
       background: #fafafa;
     }
     #previewTitle { font-size: 12px; margin-bottom: 6px; opacity: 0.85; }
+
     #previewCanvas {
       border: 1px solid #999;
       background: #000;
       image-rendering: pixelated;
       display: block;
+      cursor: crosshair;
     }
+
     #hint {
       font-size: 12px;
       margin-top: 6px;
       opacity: 0.9;
       line-height: 1.35;
     }
+
     #qualityLine {
       font-size: 12px;
       margin-top: 6px;
@@ -51,10 +60,16 @@
       line-height: 1.35;
     }
     #qualityLine code { font-family: Consolas, monospace; }
-    #suggestion {
-      margin-top: 4px;
-      opacity: 0.9;
+    #suggestion { margin-top: 4px; opacity: 0.9; }
+
+    #viewControls {
+      margin-top: 6px;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
     }
+    #viewControls code { font-family: Consolas, monospace; }
   </style>
 </head>
 
@@ -65,14 +80,17 @@
     <button id="startBtn">Start</button>
     <button id="stopBtn">Stop</button>
     <button id="testFlashBtn">Test flash</button>
-    <button id="calibrateBtn" title="Click to arm, then drag a box on the preview around the progress window corner.">Calibrate</button>
+    <button id="calibrateBtn" title="Auto-freezes. Then drag a box on the zoomable preview.">Calibrate</button>
+    <button id="freezeBtn" title="Freeze/unfreeze the preview frame.">Freeze</button>
+    <button id="resetViewBtn" title="Reset zoom/pan.">Reset view</button>
 
     <div id="versionBar">
       Version: <code id="appVersion">unknown</code> |
       Build: <code id="appBuild">unknown</code> |
       Loaded: <code id="loadedAt">unknown</code><br/>
       Calibrated WIDE: <code id="calibWide">none</code> |
-      Calibrate mode: <code id="calibMode">off</code>
+      Calibrate mode: <code id="calibMode">off</code> |
+      Frame: <code id="frameMode">live</code>
     </div>
   </div>
 
@@ -85,7 +103,18 @@
 
   <div id="previewWrap">
     <div id="previewTitle">Capture preview (scan region is drawn here)</div>
-    <canvas id="previewCanvas" width="340" height="180"></canvas>
+
+    <!-- Bigger canvas so you can actually work -->
+    <canvas id="previewCanvas" width="520" height="320"></canvas>
+
+    <div id="viewControls">
+      <label>
+        Zoom:
+        <input id="zoomSlider" type="range" min="1" max="4" step="0.25" value="1" />
+        <code id="zoomLabel">1.00×</code>
+      </label>
+      <span>Pan: right-drag or hold <code>Space</code> + drag</span>
+    </div>
 
     <div id="qualityLine">
       Anchor quality: <code id="qualityScore">—</code>
@@ -94,8 +123,8 @@
     </div>
 
     <div id="hint">
-      Click <b>Calibrate</b>, then <b>drag a box</b> tightly around the <b>top-right corner</b> of the progress window
-      (include the red X + some surrounding frame/texture). Bigger than the X alone.
+      Calibrate freezes the frame so it’s smooth. Then zoom in and drag a tight box around stable frame/texture/borders.
+      Avoid dynamic text and the moving green fill.
     </div>
   </div>
 
@@ -103,7 +132,7 @@
   <pre id="debugBox"></pre>
 
   <script>
-    window.APP_VERSION = "0.4.2";
+    window.APP_VERSION = "0.4.3";
     window.BUILD_ID = "build-" + Date.now();
 
     document.getElementById("appVersion").textContent = window.APP_VERSION;

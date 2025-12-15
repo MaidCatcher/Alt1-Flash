@@ -1,5 +1,4 @@
-// app.js — Drag-to-calibrate sets WIDE region AND captures per-user anchor
-// Adds: live anchor quality score + auto "expand selection" suggestions
+// app.js — Smooth calibration: freeze frame + zoom/pan preview + drag-to-calibrate with live quality.
 
 const statusEl = document.getElementById("status");
 const modeEl   = document.getElementById("mode");
@@ -11,68 +10,74 @@ const startBtn = document.getElementById("startBtn");
 const stopBtn  = document.getElementById("stopBtn");
 const testBtn  = document.getElementById("testFlashBtn");
 const calibBtn = document.getElementById("calibrateBtn");
+const freezeBtn = document.getElementById("freezeBtn");
+const resetViewBtn = document.getElementById("resetViewBtn");
 
 const calibWideEl = document.getElementById("calibWide");
 const calibModeEl = document.getElementById("calibMode");
+const frameModeEl = document.getElementById("frameMode");
 
 const qualityScoreEl = document.getElementById("qualityScore");
 const qualityDetailEl = document.getElementById("qualityDetail");
 const suggestionTextEl = document.getElementById("suggestionText");
 
+const zoomSlider = document.getElementById("zoomSlider");
+const zoomLabel = document.getElementById("zoomLabel");
+
 const canvas = document.getElementById("previewCanvas");
 const ctx = canvas.getContext("2d", { willReadFrequently: true });
 
-function setStatus(v){ if (statusEl) statusEl.textContent = v; }
-function setMode(v){ if (modeEl) modeEl.textContent = v; }
-function setLock(v){ if (lockEl) lockEl.textContent = v; }
-function setProgress(v){ if (progEl) progEl.textContent = v; }
-function dbg(v){ if (dbgEl) dbgEl.textContent = String(v); }
-
+function setStatus(v){ statusEl.textContent = v; }
+function setMode(v){ modeEl.textContent = v; }
+function setLock(v){ lockEl.textContent = v; }
+function setProgress(v){ progEl.textContent = v; }
+function dbg(v){ dbgEl.textContent = String(v); }
 function setQuality(score, detail, suggestion) {
-  if (qualityScoreEl) qualityScoreEl.textContent = score;
-  if (qualityDetailEl) qualityDetailEl.textContent = detail || "";
-  if (suggestionTextEl) suggestionTextEl.textContent = suggestion || "—";
+  qualityScoreEl.textContent = score;
+  qualityDetailEl.textContent = detail || "";
+  suggestionTextEl.textContent = suggestion || "—";
 }
 
 const APP_VERSION = window.APP_VERSION || "unknown";
 const BUILD_ID = window.BUILD_ID || "unknown";
 
-// ---- localStorage keys ----
+// ---- storage ----
 const LS_WIDE = "progflash.calibWide";
-const LS_ANCHOR = "progflash.userAnchor"; // {w,h,rgbaBase64}
+const LS_ANCHOR = "progflash.userAnchor";
 
-// ---- state ----
+// ---- runtime state ----
 let running = false;
 let loop = null;
 
 let locked = false;
 let lastLock = { x: 0, y: 0, score: 0 };
-let lastBestScore = 0;
 
 let calibrateArmed = false;
 
-// Drag state (canvas coords)
-let drag = { active: false, sx: 0, sy: 0, ex: 0, ey: 0 };
+// live frame vs frozen frame
+let frozen = false;
+let lastFrame = null;     // latest captured frame (live)
+let frozenFrame = null;   // snapshot used for calibration/preview when frozen
 
-// Preview update rate
-let lastPreviewDraw = 0;
-const PREVIEW_MS = 250;
+// drag states
+let drag = { active: false, sx: 0, sy: 0, ex: 0, ey: 0 };      // canvas coords
+let pan = { active: false, sx: 0, sy: 0, startX: 0, startY: 0 };
+let spaceDown = false;
 
-// Live quality throttle
-let lastQualityEval = 0;
-const QUALITY_MS = 450;
+// view transform (in capture space)
+let view = {
+  zoom: 1.0,
+  offsetX: 0, // capture-space top-left pixel shown at canvas top-left
+  offsetY: 0
+};
 
-// map canvas -> capture coords
-let previewMap = { scale: 1, offX: 0, offY: 0, drawW: 0, drawH: 0, srcW: 0, srcH: 0 };
+// map and base scale
+let previewBase = { baseScale: 1, drawW: 0, drawH: 0, srcW: 0, srcH: 0 };
 
-// last captured frame (for quality eval)
-let lastFrame = null;
-
-// The current anchor used by matching
+// current anchor
 let anchor = null;
-let userAnchor = loadJSON(LS_ANCHOR);
 
-// ---- config ----
+// config
 const MATCH = {
   tolerance: 80,
   minScoreWide: 0.62,
@@ -81,7 +86,6 @@ const MATCH = {
   ignoreAlphaBelow: 200
 };
 
-// Fast quality scan uses coarser sampling to stay smooth
 const QUALITY = {
   tolerance: 90,
   step: 4,
@@ -91,35 +95,33 @@ const QUALITY = {
 
 const TRACK = { padX: 220, padY: 140, minW: 420, minH: 220 };
 
-// -------- persistence helpers --------
+// throttle
+let lastPreviewDraw = 0;
+const PREVIEW_MS = 140; // smoother but not too heavy
+let lastQualityEval = 0;
+const QUALITY_MS = 320;
+
+// ---- helpers ----
 function loadJSON(key){
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch (_) { return null; }
+  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : null; } catch { return null; }
 }
 function saveJSON(key, obj){
-  try { localStorage.setItem(key, JSON.stringify(obj)); } catch (_) {}
+  try { localStorage.setItem(key, JSON.stringify(obj)); } catch {}
+}
+function clamp(n, a, b){ return Math.max(a, Math.min(b, n)); }
+
+function updateLabels(calibratedWide){
+  calibWideEl.textContent = calibratedWide
+    ? `x=${calibratedWide.x},y=${calibratedWide.y},w=${calibratedWide.w},h=${calibratedWide.h}`
+    : "none";
+  calibModeEl.textContent = calibrateArmed ? "ARMED (drag on preview)" : "off";
+  frameModeEl.textContent = frozen ? "frozen" : "live";
+  zoomLabel.textContent = `${view.zoom.toFixed(2)}×`;
 }
 
-let calibratedWide = loadJSON(LS_WIDE);
-
-function updateLabels(){
-  if (calibWideEl) {
-    calibWideEl.textContent = calibratedWide
-      ? `x=${calibratedWide.x},y=${calibratedWide.y},w=${calibratedWide.w},h=${calibratedWide.h}`
-      : "none";
-  }
-  if (calibModeEl) calibModeEl.textContent = calibrateArmed ? "ARMED (drag on preview)" : "off";
-}
-
-// -------- pixel helpers --------
 function rgba(r,g,b,a){ return (r&255)|((g&255)<<8)|((b&255)<<16)|((a&255)<<24); }
-
 function bytesToBase64(bytes){
-  let s = "";
-  for (let i=0;i<bytes.length;i++) s += String.fromCharCode(bytes[i]);
+  let s=""; for (let i=0;i<bytes.length;i++) s += String.fromCharCode(bytes[i]);
   return btoa(s);
 }
 function base64ToBytes(b64){
@@ -128,7 +130,6 @@ function base64ToBytes(b64){
   for (let i=0;i<bin.length;i++) out[i] = bin.charCodeAt(i) & 255;
   return out;
 }
-
 function makeAnchorFromRgbaBytes(w, h, rgbaBytes){
   return {
     width: w,
@@ -143,43 +144,18 @@ function makeAnchorFromRgbaBytes(w, h, rgbaBytes){
 }
 
 function clampRegion(img, r){
-  let x = Math.max(0, Math.min(img.width - 1, r.x));
-  let y = Math.max(0, Math.min(img.height - 1, r.y));
-  let w = Math.max(1, Math.min(r.w, img.width - x));
-  let h = Math.max(1, Math.min(r.h, img.height - y));
+  let x = clamp(r.x, 0, img.width - 1);
+  let y = clamp(r.y, 0, img.height - 1);
+  let w = clamp(r.w, 1, img.width - x);
+  let h = clamp(r.h, 1, img.height - y);
   return { x, y, w, h };
 }
 
-function getWideRegion(img){
-  if (calibratedWide) {
-    const r = clampRegion(img, calibratedWide);
-    return { ...r, mode: "WIDE(CALIB)" };
-  }
-  return { x: 0, y: 0, w: img.width, h: img.height, mode: "WIDE(FULL)" };
-}
-
-function getTrackRegion(img){
-  const desiredW = Math.max(TRACK.minW, TRACK.padX * 2);
-  const desiredH = Math.max(TRACK.minH, TRACK.padY * 2);
-
-  let x = Math.floor(lastLock.x - desiredW / 2);
-  let y = Math.floor(lastLock.y - desiredH / 2);
-
-  x = Math.max(0, Math.min(img.width  - 1, x));
-  y = Math.max(0, Math.min(img.height - 1, y));
-
-  let w = Math.min(desiredW, img.width  - x);
-  let h = Math.min(desiredH, img.height - y);
-
-  return { x, y, w: Math.max(1,w), h: Math.max(1,h), mode: "TRACK" };
-}
-
 function cropView(img, ox, oy, w, h){
-  const x0 = Math.max(0, Math.min(img.width  - 1, ox));
-  const y0 = Math.max(0, Math.min(img.height - 1, oy));
-  const cw = Math.max(1, Math.min(w, img.width  - x0));
-  const ch = Math.max(1, Math.min(h, img.height - y0));
-
+  const x0 = clamp(ox, 0, img.width - 1);
+  const y0 = clamp(oy, 0, img.height - 1);
+  const cw = clamp(w, 1, img.width - x0);
+  const ch = clamp(h, 1, img.height - y0);
   return {
     width: cw,
     height: ch,
@@ -189,7 +165,49 @@ function cropView(img, ox, oy, w, h){
   };
 }
 
-// -------- matching --------
+// ---- calibration storage ----
+let calibratedWide = loadJSON(LS_WIDE);
+let userAnchor = loadJSON(LS_ANCHOR);
+
+function loadUserAnchorIfAny(){
+  userAnchor = loadJSON(LS_ANCHOR);
+  if (!userAnchor || !userAnchor.rgbaBase64) return null;
+  return makeAnchorFromRgbaBytes(userAnchor.w, userAnchor.h, base64ToBytes(userAnchor.rgbaBase64));
+}
+
+async function loadAnchorFromFiles(){
+  // try both paths
+  const a1 = await loadImage("img/progbar_anchor.png?v=" + encodeURIComponent(BUILD_ID));
+  if (a1) return a1;
+  const a2 = await loadImage("progbar_anchor.png?v=" + encodeURIComponent(BUILD_ID));
+  if (a2) return a2;
+  return null;
+}
+
+async function ensureAnchorLoaded(){
+  const ua = loadUserAnchorIfAny();
+  if (ua) return ua;
+  return await loadAnchorFromFiles();
+}
+
+// ---- matching ----
+function getWideRegion(img){
+  if (calibratedWide) return { ...clampRegion(img, calibratedWide), mode: "WIDE(CALIB)" };
+  return { x: 0, y: 0, w: img.width, h: img.height, mode: "WIDE(FULL)" };
+}
+
+function getTrackRegion(img){
+  const desiredW = Math.max(TRACK.minW, TRACK.padX * 2);
+  const desiredH = Math.max(TRACK.minH, TRACK.padY * 2);
+  let x = Math.floor(lastLock.x - desiredW / 2);
+  let y = Math.floor(lastLock.y - desiredH / 2);
+  x = clamp(x, 0, img.width - 1);
+  y = clamp(y, 0, img.height - 1);
+  let w = Math.min(desiredW, img.width - x);
+  let h = Math.min(desiredH, img.height - y);
+  return { x, y, w: Math.max(1,w), h: Math.max(1,h), mode: "TRACK" };
+}
+
 function runMatch(img, region, acceptScore){
   const hay = cropView(img, region.x, region.y, region.w, region.h);
   const res = findAnchor(hay, anchor, {
@@ -198,38 +216,148 @@ function runMatch(img, region, acceptScore){
     step: MATCH.step,
     ignoreAlphaBelow: MATCH.ignoreAlphaBelow
   });
-
   const bestScore = res && typeof res.score === "number" ? res.score : 0;
-
   if (res && res.ok && bestScore >= acceptScore) {
     return { ok: true, x: res.x + hay._offsetX, y: res.y + hay._offsetY, score: bestScore };
   }
   return { ok: false, score: bestScore };
 }
 
-// -------- preview mapping --------
-function canvasToCapture(mx, my){
-  const { scale, offX, offY, drawW, drawH, srcW, srcH } = previewMap;
-  if (!scale || drawW <= 0 || drawH <= 0) return null;
-  if (mx < offX || my < offY || mx > offX + drawW || my > offY + drawH) return null;
-
-  const cx = Math.floor((mx - offX) / scale);
-  const cy = Math.floor((my - offY) / scale);
-  return { x: Math.max(0, Math.min(srcW - 1, cx)), y: Math.max(0, Math.min(srcH - 1, cy)) };
+// ---- preview rendering with zoom/pan ----
+function getDisplayFrame(){
+  return frozen ? frozenFrame : lastFrame;
 }
 
-// -------- live quality scoring --------
+function resetViewToFit(img){
+  // We render the capture into the canvas with a base scale and then apply zoom/pan in capture space.
+  view.zoom = 1.0;
+  view.offsetX = 0;
+  view.offsetY = 0;
+
+  // fit to canvas (baseScale)
+  const cw = canvas.width, ch = canvas.height;
+  const baseScale = Math.min(cw / img.width, ch / img.height);
+  const drawW = Math.floor(img.width * baseScale);
+  const drawH = Math.floor(img.height * baseScale);
+  previewBase = { baseScale, drawW, drawH, srcW: img.width, srcH: img.height };
+}
+
+function drawPreview(img, scanRegion, found){
+  const now = Date.now();
+  if (!frozen && now - lastPreviewDraw < PREVIEW_MS) return;
+  lastPreviewDraw = now;
+
+  // ensure base fit is computed
+  if (!previewBase.srcW || previewBase.srcW !== img.width || previewBase.srcH !== img.height) {
+    resetViewToFit(img);
+  }
+
+  const cw = canvas.width, ch = canvas.height;
+  ctx.clearRect(0, 0, cw, ch);
+
+  // Create ImageData
+  const srcW = img.width, srcH = img.height;
+  const imageData = new ImageData(new Uint8ClampedArray(img.data), srcW, srcH);
+
+  // Put into temp canvas
+  const tmp = document.createElement("canvas");
+  tmp.width = srcW; tmp.height = srcH;
+  const tctx = tmp.getContext("2d", { willReadFrequently: true });
+  tctx.putImageData(imageData, 0, 0);
+
+  const { baseScale } = previewBase;
+
+  // zoom/pan are applied in capture space:
+  // We pick a capture-space rectangle [offsetX..offsetX+viewW] and draw it scaled to fill.
+  const viewW = clamp(Math.floor(srcW / view.zoom), 1, srcW);
+  const viewH = clamp(Math.floor(srcH / view.zoom), 1, srcH);
+
+  view.offsetX = clamp(view.offsetX, 0, srcW - viewW);
+  view.offsetY = clamp(view.offsetY, 0, srcH - viewH);
+
+  // Destination size is canvas area; we draw the cropped source into canvas directly.
+  ctx.drawImage(
+    tmp,
+    view.offsetX, view.offsetY, viewW, viewH,
+    0, 0, cw, ch
+  );
+
+  // helper: capture -> canvas
+  const capToCanvas = (cx, cy) => {
+    const nx = (cx - view.offsetX) / viewW;
+    const ny = (cy - view.offsetY) / viewH;
+    return { x: Math.floor(nx * cw), y: Math.floor(ny * ch) };
+  };
+  const capToCanvasWH = (w, h) => {
+    return { w: Math.floor((w / viewW) * cw), h: Math.floor((h / viewH) * ch) };
+  };
+
+  // scan region overlay
+  if (scanRegion) {
+    const p = capToCanvas(scanRegion.x, scanRegion.y);
+    const s = capToCanvasWH(scanRegion.w, scanRegion.h);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = (scanRegion.mode === "TRACK") ? "orange" : "lime";
+    ctx.strokeRect(p.x, p.y, s.w, s.h);
+
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(p.x, Math.max(0, p.y - 16), 160, 16);
+    ctx.fillStyle = "white";
+    ctx.font = "12px Arial";
+    ctx.fillText(scanRegion.mode, p.x + 4, Math.max(12, p.y - 4));
+  }
+
+  // found overlay
+  if (found && anchor) {
+    const p = capToCanvas(found.x, found.y);
+    const s = capToCanvasWH(anchor.width, anchor.height);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "deepskyblue";
+    ctx.strokeRect(p.x, p.y, s.w, s.h);
+  }
+
+  // calibration drag overlay
+  if (calibrateArmed) {
+    ctx.fillStyle = "rgba(0,0,0,0.65)";
+    ctx.fillRect(6, 6, cw - 12, 22);
+    ctx.fillStyle = "white";
+    ctx.font = "12px Arial";
+    ctx.fillText("CALIBRATE: zoom/pan, then drag a box. (Frame is frozen)", 12, 22);
+
+    if (drag.active) {
+      const x = Math.min(drag.sx, drag.ex);
+      const y = Math.min(drag.sy, drag.ey);
+      const w = Math.abs(drag.ex - drag.sx);
+      const h = Math.abs(drag.ey - drag.sy);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "yellow";
+      ctx.strokeRect(x, y, w, h);
+    }
+  }
+}
+
+// canvas -> capture mapping with zoom/pan
+function canvasToCapture(mx, my, img){
+  const cw = canvas.width, ch = canvas.height;
+  const srcW = img.width, srcH = img.height;
+
+  const viewW = clamp(Math.floor(srcW / view.zoom), 1, srcW);
+  const viewH = clamp(Math.floor(srcH / view.zoom), 1, srcH);
+
+  const nx = mx / cw;
+  const ny = my / ch;
+
+  const cx = Math.floor(view.offsetX + nx * viewW);
+  const cy = Math.floor(view.offsetY + ny * viewH);
+  return { x: clamp(cx, 0, srcW - 1), y: clamp(cy, 0, srcH - 1) };
+}
+
+// ---- live quality (uses frozenFrame so it stays smooth) ----
 function computeQualityFromScores(best, second, aw, ah) {
   const gap = Math.max(0, best - second);
-
-  // Build a "human-feel" 0..100 score:
-  // - matching strength matters most
-  // - uniqueness gap matters a lot
-  // - too-small anchors get penalized
   const sizePenalty =
-    (aw * ah < 1500) ? 0.14 :   // e.g. 40x35
-    (aw * ah < 2800) ? 0.08 :   // e.g. 70x40
-    0;
+    (aw * ah < 1500) ? 0.14 :
+    (aw * ah < 2800) ? 0.08 : 0;
 
   let q = (best * 0.75 + gap * 1.3) - sizePenalty;
   q = Math.max(0, Math.min(1, q));
@@ -238,28 +366,14 @@ function computeQualityFromScores(best, second, aw, ah) {
 
 function autoSuggestion(best, second, gap, aw, ah) {
   const tooSmall = (aw < 45 || ah < 30);
-  const sizeOk = (aw >= 60 && ah >= 40);
-
-  if (best < 0.35) {
-    return "Not matching well. Expand selection to include more frame/texture (avoid text and the moving fill).";
-  }
-  if (best < 0.55) {
-    return "Match is weak. Expand a bit (10–30px) to include more of the window corner/frame.";
-  }
-  if (gap < 0.06) {
-    return "Anchor may not be unique (too many similar matches). Expand selection to include a more distinctive corner/edge.";
-  }
-  if (tooSmall) {
-    return "Anchor is small. Make it bigger (aim ~80×50+) including more of the frame around the X.";
-  }
-  if (!sizeOk && gap < 0.10) {
-    return "Looks OK, but expanding slightly could improve uniqueness and stability.";
-  }
+  if (best < 0.35) return "Not matching well. Expand selection to include more frame/texture (avoid text/fill).";
+  if (best < 0.55) return "Match is weak. Expand 10–30px to include more corner/frame texture.";
+  if (gap < 0.06) return "Anchor may not be unique. Expand to include more distinctive corner/edge shape.";
+  if (tooSmall) return "Anchor is small. Make it bigger (aim ~80×50+) including frame texture.";
   return "Looks good. If it ever drops lock, expand slightly to include more border texture.";
 }
 
-// Build a temporary anchor from a drag rectangle (capture coords) using lastFrame
-function buildTempAnchorFromDrag(img, rect) {
+function buildTempAnchorFromRect(img, rect) {
   const r = clampRegion(img, rect);
   const bytes = new Uint8ClampedArray(r.w * r.h * 4);
   let idx = 0;
@@ -273,28 +387,23 @@ function buildTempAnchorFromDrag(img, rect) {
       bytes[idx++] = img.data[si + 3];
     }
   }
-  return { r, tempAnchor: makeAnchorFromRgbaBytes(r.w, r.h, bytes) };
+  return { r, tempAnchor: makeAnchorFromRgbaBytes(r.w, r.h, bytes), bytes };
 }
 
-function evaluateLiveQuality(img) {
+function evaluateLiveQuality(img){
   if (!calibrateArmed || !drag.active) return;
 
   const now = Date.now();
   if (now - lastQualityEval < QUALITY_MS) return;
   lastQualityEval = now;
 
-  // Convert drag box to capture coords
   const x1 = Math.min(drag.sx, drag.ex);
   const y1 = Math.min(drag.sy, drag.ey);
   const x2 = Math.max(drag.sx, drag.ex);
   const y2 = Math.max(drag.sy, drag.ey);
 
-  const p1 = canvasToCapture(x1, y1);
-  const p2 = canvasToCapture(x2, y2);
-  if (!p1 || !p2) {
-    setQuality("—", "", "Drag inside the preview image area.");
-    return;
-  }
+  const p1 = canvasToCapture(x1, y1, img);
+  const p2 = canvasToCapture(x2, y2, img);
 
   const rect = { x: Math.min(p1.x, p2.x), y: Math.min(p1.y, p2.y), w: Math.abs(p2.x - p1.x), h: Math.abs(p2.y - p1.y) };
   if (rect.w < 20 || rect.h < 20) {
@@ -302,10 +411,8 @@ function evaluateLiveQuality(img) {
     return;
   }
 
-  // Build temporary anchor from current drag selection
-  const { r, tempAnchor } = buildTempAnchorFromDrag(img, rect);
+  const { r, tempAnchor } = buildTempAnchorFromRect(img, rect);
 
-  // Evaluate it inside a padded area around the selection (fast)
   const padded = clampRegion(img, {
     x: Math.max(0, r.x - QUALITY.pad),
     y: Math.max(0, r.y - QUALITY.pad),
@@ -336,238 +443,18 @@ function evaluateLiveQuality(img) {
   );
 }
 
-// -------- preview drawing --------
-function drawPreview(img, scanRegion, found){
-  const now = Date.now();
-  if (now - lastPreviewDraw < PREVIEW_MS) return;
-  lastPreviewDraw = now;
-
-  lastFrame = img;
-
-  const srcW = img.width, srcH = img.height;
-  const imageData = new ImageData(new Uint8ClampedArray(img.data), srcW, srcH);
-
-  const cw = canvas.width, ch = canvas.height;
-  const scale = Math.min(cw / srcW, ch / srcH);
-  const drawW = Math.floor(srcW * scale);
-  const drawH = Math.floor(srcH * scale);
-  const offX = Math.floor((cw - drawW) / 2);
-  const offY = Math.floor((ch - drawH) / 2);
-
-  previewMap = { scale, offX, offY, drawW, drawH, srcW, srcH };
-
-  ctx.clearRect(0, 0, cw, ch);
-
-  const tmp = document.createElement("canvas");
-  tmp.width = srcW; tmp.height = srcH;
-  const tctx = tmp.getContext("2d", { willReadFrequently: true });
-  tctx.putImageData(imageData, 0, 0);
-  ctx.drawImage(tmp, 0, 0, srcW, srcH, offX, offY, drawW, drawH);
-
-  // Scan region
-  if (scanRegion) {
-    const rx = offX + Math.floor(scanRegion.x * scale);
-    const ry = offY + Math.floor(scanRegion.y * scale);
-    const rw = Math.floor(scanRegion.w * scale);
-    const rh = Math.floor(scanRegion.h * scale);
-
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = (scanRegion.mode === "TRACK") ? "orange" : "lime";
-    ctx.strokeRect(rx, ry, rw, rh);
-
-    ctx.fillStyle = "rgba(0,0,0,0.6)";
-    ctx.fillRect(rx, Math.max(0, ry - 16), 170, 16);
-    ctx.fillStyle = "white";
-    ctx.font = "12px Arial";
-    ctx.fillText(scanRegion.mode, rx + 4, Math.max(12, ry - 4));
-  }
-
-  // Found match box
-  if (found && anchor) {
-    const fx = offX + Math.floor(found.x * scale);
-    const fy = offY + Math.floor(found.y * scale);
-    const fw = Math.floor(anchor.width * scale);
-    const fh = Math.floor(anchor.height * scale);
-
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = "deepskyblue";
-    ctx.strokeRect(fx, fy, fw, fh);
-  }
-
-  // Calibration drag overlay
-  if (calibrateArmed) {
-    ctx.fillStyle = "rgba(0,0,0,0.65)";
-    ctx.fillRect(6, 6, cw - 12, 22);
-    ctx.fillStyle = "white";
-    ctx.font = "12px Arial";
-    ctx.fillText("CALIBRATE: drag around the progress window corner (X + frame)", 12, 22);
-
-    if (drag.active) {
-      const x = Math.min(drag.sx, drag.ex);
-      const y = Math.min(drag.sy, drag.ey);
-      const w = Math.abs(drag.ex - drag.sx);
-      const h = Math.abs(drag.ey - drag.sy);
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = "yellow";
-      ctx.strokeRect(x, y, w, h);
-
-      // Live quality evaluation (throttled)
-      evaluateLiveQuality(img);
-    } else {
-      setQuality("—", "", "Drag a box around the corner (include frame texture).");
-    }
-  }
-}
-
-// -------- calibration (mouseup saves WIDE + user anchor) --------
-canvas.addEventListener("mousedown", (ev) => {
-  if (!calibrateArmed) return;
-  const rect = canvas.getBoundingClientRect();
-  drag.active = true;
-  drag.sx = ev.clientX - rect.left;
-  drag.sy = ev.clientY - rect.top;
-  drag.ex = drag.sx; drag.ey = drag.sy;
-});
-
-canvas.addEventListener("mousemove", (ev) => {
-  if (!calibrateArmed || !drag.active) return;
-  const rect = canvas.getBoundingClientRect();
-  drag.ex = ev.clientX - rect.left;
-  drag.ey = ev.clientY - rect.top;
-});
-
-canvas.addEventListener("mouseup", (ev) => {
-  if (!calibrateArmed || !drag.active) return;
-  drag.active = false;
-
-  const rect = canvas.getBoundingClientRect();
-  const mx2 = ev.clientX - rect.left;
-  const my2 = ev.clientY - rect.top;
-
-  const x1 = Math.min(drag.sx, mx2);
-  const y1 = Math.min(drag.sy, my2);
-  const x2 = Math.max(drag.sx, mx2);
-  const y2 = Math.max(drag.sy, my2);
-
-  const p1 = canvasToCapture(x1, y1);
-  const p2 = canvasToCapture(x2, y2);
-  if (!p1 || !p2) {
-    setStatus("Calibrate failed");
-    dbg("Drag inside the preview image area.");
-    return;
-  }
-
-	// Raw drag rect
-	const rawX = Math.min(p1.x, p2.x);
-	const rawY = Math.min(p1.y, p2.y);
-	const rawW = Math.max(1, Math.abs(p2.x - p1.x));
-	const rawH = Math.max(1, Math.abs(p2.y - p1.y));
-
-// Trim to a recommended size anchored to the TOP-RIGHT of the selection
-const REC_W = 140;
-const REC_H = 70;
-
-// Anchor rect: take top-right corner from their selection
-const ax = Math.max(0, rawX + rawW - REC_W);
-const ay = Math.max(0, rawY);
-const aw = REC_W;
-const ah = REC_H;
-
-
-  if (!lastFrame) lastFrame = captureRs();
-  if (!lastFrame) {
-    setStatus("Capture failed");
-    dbg("Cannot capture to save anchor.");
-    return;
-  }
-
-  // Anchor crop (exact drag box)
-  const aRect = clampRegion(lastFrame, { x: ax, y: ay, w: aw, h: ah });
-  const bytes = new Uint8ClampedArray(aRect.w * aRect.h * 4);
-  let idx = 0;
-  for (let y = 0; y < aRect.h; y++) {
-    for (let x = 0; x < aRect.w; x++) {
-      const px = (aRect.y + y) * lastFrame.width + (aRect.x + x);
-      const si = px * 4;
-      bytes[idx++] = lastFrame.data[si + 0];
-      bytes[idx++] = lastFrame.data[si + 1];
-      bytes[idx++] = lastFrame.data[si + 2];
-      bytes[idx++] = lastFrame.data[si + 3];
-    }
-  }
-
-  userAnchor = { w: aRect.w, h: aRect.h, rgbaBase64: bytesToBase64(bytes) };
-  saveJSON(LS_ANCHOR, userAnchor);
-  anchor = makeAnchorFromRgbaBytes(userAnchor.w, userAnchor.h, base64ToBytes(userAnchor.rgbaBase64));
-
-  // WIDE region padded around anchor for reacquire
-  const pad = 160;
-  calibratedWide = clampRegion(lastFrame, { x: aRect.x - pad, y: aRect.y - pad, w: aRect.w + pad * 2, h: aRect.h + pad * 2 });
-  saveJSON(LS_WIDE, calibratedWide);
-
-  calibrateArmed = false;
-  updateLabels();
-
-  setStatus("Calibrated + Anchor saved");
-  dbg(JSON.stringify({
-    app: { version: APP_VERSION, build: BUILD_ID },
-    calibratedWide,
-    userAnchor: { w: userAnchor.w, h: userAnchor.h, bytes: userAnchor.w * userAnchor.h * 4 }
-  }, null, 2));
-});
-
-// -------- anchor loading --------
-async function loadAnchorFromFiles(){
-  const a1 = await loadImage("img/progbar_anchor.png?v=" + encodeURIComponent(BUILD_ID));
-  if (a1) return a1;
-  const a2 = await loadImage("progbar_anchor.png?v=" + encodeURIComponent(BUILD_ID));
-  if (a2) return a2;
-  return null;
-}
-function loadUserAnchorIfAny(){
-  userAnchor = loadJSON(LS_ANCHOR);
-  if (!userAnchor || !userAnchor.rgbaBase64) return null;
-  return makeAnchorFromRgbaBytes(userAnchor.w, userAnchor.h, base64ToBytes(userAnchor.rgbaBase64));
-}
-async function ensureAnchorLoaded(){
-  const ua = loadUserAnchorIfAny();
-  if (ua) return ua;
-  return await loadAnchorFromFiles();
-}
-
-// -------- main loop --------
+// ---- main loop ----
 async function start(){
-  if (!window.alt1){
-    setStatus("Alt1 missing");
-    dbg("Open this inside Alt1 Toolkit.");
-    return;
-  }
-  if (typeof window.captureRs !== "function" ||
-      typeof window.findAnchor !== "function" ||
-      typeof window.loadImage !== "function") {
-    setStatus("matcher.js not loaded");
-    dbg(JSON.stringify({
-      captureRs: typeof window.captureRs,
-      findAnchor: typeof window.findAnchor,
-      loadImage: typeof window.loadImage
-    }, null, 2));
-    return;
-  }
+  if (!window.alt1) { setStatus("Alt1 missing"); dbg("Open inside Alt1 Toolkit."); return; }
 
-  if (!anchor){
+  if (!anchor) {
     setStatus("Loading anchor…");
     anchor = await ensureAnchorLoaded();
   }
-  if (!anchor){
-    setStatus("No anchor");
-    dbg("No anchor available. Use Calibrate to capture one.");
-    return;
-  }
+  if (!anchor) { setStatus("No anchor"); dbg("Use Calibrate to capture one."); return; }
 
   running = true;
   locked = false;
-  lastLock = { x: 0, y: 0, score: 0 };
-  lastBestScore = 0;
 
   setMode("Running");
   setStatus("Searching…");
@@ -592,21 +479,25 @@ function stop(){
 function tick(){
   if (!running) return;
 
-  const img = captureRs();
-  if (!img){
-    setStatus("Capture failed");
-    dbg("captureRs(): null\n\n" + JSON.stringify(window.progflashCaptureDiag || {}, null, 2));
-    return;
+  // Only capture new frames if not frozen
+  if (!frozen) {
+    const img = captureRs();
+    if (!img) {
+      setStatus("Capture failed");
+      dbg("captureRs(): null\n\n" + JSON.stringify(window.progflashCaptureDiag || {}, null, 2));
+      return;
+    }
+    lastFrame = img;
   }
 
-  lastFrame = img;
+  const img = getDisplayFrame();
+  if (!img) return;
 
   let region, result;
 
   if (locked) {
     region = getTrackRegion(img);
     result = runMatch(img, region, MATCH.minScoreTrack);
-
     if (!result.ok) {
       const wide = getWideRegion(img);
       const reacq = runMatch(img, wide, MATCH.minScoreWide);
@@ -619,67 +510,231 @@ function tick(){
     result = runMatch(img, region, MATCH.minScoreWide);
   }
 
-  lastBestScore = result.score ?? 0;
-
-  if (result.ok){
+  if (result.ok) {
     locked = true;
     lastLock = { x: result.x, y: result.y, score: result.score };
-
     setStatus("Locked");
     setLock(`x=${result.x}, y=${result.y}`);
     setProgress("locked");
-
-    drawPreview(img, region, { x: result.x, y: result.y });
-
-    dbg(JSON.stringify({
-      app: { version: APP_VERSION, build: BUILD_ID },
-      scanMode: region.mode,
-      capture: { w: img.width, h: img.height },
-      calibratedWide,
-      anchor: { w: anchor.width, h: anchor.height, source: loadUserAnchorIfAny() ? "user" : "file" },
-      res: { ok: true, x: result.x, y: result.y, score: result.score }
-    }, null, 2));
   } else {
     setStatus("Searching…");
     setLock("none");
     setProgress("—");
-
-    drawPreview(img, region, null);
-
-    dbg(JSON.stringify({
-      app: { version: APP_VERSION, build: BUILD_ID },
-      scanMode: region.mode,
-      capture: { w: img.width, h: img.height },
-      calibratedWide,
-      anchor: anchor ? { w: anchor.width, h: anchor.height } : null,
-      res: { ok: false, bestScore: lastBestScore }
-    }, null, 2));
   }
+
+  drawPreview(img, region, result.ok ? { x: result.x, y: result.y } : null);
+  updateLabels(calibratedWide);
+
+  // debug
+  dbg(JSON.stringify({
+    app: { version: APP_VERSION, build: BUILD_ID },
+    frozen,
+    scanMode: region.mode,
+    capture: { w: img.width, h: img.height },
+    calibratedWide,
+    anchor: anchor ? { w: anchor.width, h: anchor.height } : null,
+    res: result.ok ? { ok: true, x: result.x, y: result.y, score: result.score } : { ok: false, bestScore: result.score }
+  }, null, 2));
 }
 
-// Buttons
+// ---- UI handlers ----
 testBtn.onclick = () => alert("flash test");
 startBtn.onclick = () => start().catch(console.error);
 stopBtn.onclick = () => stop();
 
+function doFreeze(on){
+  frozen = on;
+  if (frozen) {
+    // snapshot current live frame (or capture once if missing)
+    if (!lastFrame) lastFrame = captureRs();
+    frozenFrame = lastFrame;
+  } else {
+    frozenFrame = null;
+  }
+  updateLabels(calibratedWide);
+}
+
+freezeBtn.onclick = () => doFreeze(!frozen);
+
+resetViewBtn.onclick = () => {
+  const img = getDisplayFrame();
+  if (img) resetViewToFit(img);
+  view.zoom = 1.0;
+  zoomSlider.value = "1";
+  updateLabels(calibratedWide);
+};
+
+zoomSlider.oninput = () => {
+  view.zoom = parseFloat(zoomSlider.value || "1");
+  updateLabels(calibratedWide);
+};
+
 calibBtn.onclick = () => {
   calibrateArmed = !calibrateArmed;
   drag.active = false;
-  updateLabels();
-  setStatus(calibrateArmed ? "Calibrate: drag on preview" : "Idle");
-  setQuality("—", "", calibrateArmed ? "Drag a box around the corner (include frame texture)." : "—");
+  pan.active = false;
+
+  if (calibrateArmed) {
+    // auto-freeze for smooth calibration
+    doFreeze(true);
+
+    // ensure we have a frame and reset view to fit so user can zoom from sensible base
+    const img = getDisplayFrame();
+    if (img) resetViewToFit(img);
+
+    setStatus("Calibrate: frozen (zoom then drag)");
+    setQuality("—", "", "Zoom in and drag a box around stable frame/border pixels.");
+  } else {
+    setStatus("Idle");
+  }
+
+  updateLabels(calibratedWide);
 };
 
-// Init
-updateLabels();
-setQuality("—", "", "—");
-setStatus("Idle");
-setMode("Not running");
-setLock("none");
-setProgress("—");
+window.addEventListener("keydown", (e) => { if (e.code === "Space") spaceDown = true; });
+window.addEventListener("keyup", (e) => { if (e.code === "Space") spaceDown = false; });
 
-dbg(JSON.stringify({
-  app: { version: APP_VERSION, build: BUILD_ID },
-  calibratedWide,
-  hasUserAnchor: !!userAnchor
-}, null, 2));
+// ---- canvas interaction: pan + drag select ----
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
+canvas.addEventListener("mousedown", (ev) => {
+  const img = getDisplayFrame();
+  if (!img) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const mx = ev.clientX - rect.left;
+  const my = ev.clientY - rect.top;
+
+  const rightButton = (ev.button === 2);
+  if (rightButton || spaceDown) {
+    pan.active = true;
+    pan.sx = mx; pan.sy = my;
+    pan.startX = view.offsetX;
+    pan.startY = view.offsetY;
+    return;
+  }
+
+  if (!calibrateArmed) return;
+
+  drag.active = true;
+  drag.sx = mx; drag.sy = my;
+  drag.ex = mx; drag.ey = my;
+});
+
+canvas.addEventListener("mousemove", (ev) => {
+  const img = getDisplayFrame();
+  if (!img) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const mx = ev.clientX - rect.left;
+  const my = ev.clientY - rect.top;
+
+  if (pan.active) {
+    // convert canvas delta into capture delta
+    const cw = canvas.width, ch = canvas.height;
+    const srcW = img.width, srcH = img.height;
+    const viewW = clamp(Math.floor(srcW / view.zoom), 1, srcW);
+    const viewH = clamp(Math.floor(srcH / view.zoom), 1, srcH);
+
+    const dx = (mx - pan.sx) / cw * viewW;
+    const dy = (my - pan.sy) / ch * viewH;
+
+    view.offsetX = clamp(Math.floor(pan.startX - dx), 0, srcW - viewW);
+    view.offsetY = clamp(Math.floor(pan.startY - dy), 0, srcH - viewH);
+    return;
+  }
+
+  if (!calibrateArmed || !drag.active) return;
+  drag.ex = mx; drag.ey = my;
+
+  // live quality (fast + throttled)
+  evaluateLiveQuality(img);
+});
+
+canvas.addEventListener("mouseup", (ev) => {
+  const img = getDisplayFrame();
+  if (!img) return;
+
+  if (pan.active) { pan.active = false; return; }
+  if (!calibrateArmed || !drag.active) return;
+
+  drag.active = false;
+
+  const rect = canvas.getBoundingClientRect();
+  const mx2 = ev.clientX - rect.left;
+  const my2 = ev.clientY - rect.top;
+
+  const x1 = Math.min(drag.sx, mx2);
+  const y1 = Math.min(drag.sy, my2);
+  const x2 = Math.max(drag.sx, mx2);
+  const y2 = Math.max(drag.sy, my2);
+
+  const p1 = canvasToCapture(x1, y1, img);
+  const p2 = canvasToCapture(x2, y2, img);
+
+  const ax = Math.min(p1.x, p2.x);
+  const ay = Math.min(p1.y, p2.y);
+  const aw = Math.max(1, Math.abs(p2.x - p1.x));
+  const ah = Math.max(1, Math.abs(p2.y - p1.y));
+
+  // Build anchor bytes from exact selection
+  const aRect = clampRegion(img, { x: ax, y: ay, w: aw, h: ah });
+  const bytes = new Uint8ClampedArray(aRect.w * aRect.h * 4);
+  let idx = 0;
+  for (let y = 0; y < aRect.h; y++) {
+    for (let x = 0; x < aRect.w; x++) {
+      const px = (aRect.y + y) * img.width + (aRect.x + x);
+      const si = px * 4;
+      bytes[idx++] = img.data[si + 0];
+      bytes[idx++] = img.data[si + 1];
+      bytes[idx++] = img.data[si + 2];
+      bytes[idx++] = img.data[si + 3];
+    }
+  }
+
+  const ua = { w: aRect.w, h: aRect.h, rgbaBase64: bytesToBase64(bytes) };
+  saveJSON(LS_ANCHOR, ua);
+  anchor = makeAnchorFromRgbaBytes(ua.w, ua.h, base64ToBytes(ua.rgbaBase64));
+
+  // Wide region padded around anchor
+  const pad = 160;
+  calibratedWide = clampRegion(img, {
+    x: aRect.x - pad,
+    y: aRect.y - pad,
+    w: aRect.w + pad * 2,
+    h: aRect.h + pad * 2
+  });
+  saveJSON(LS_WIDE, calibratedWide);
+
+  calibrateArmed = false;
+  updateLabels(calibratedWide);
+
+  setStatus("Calibrated (anchor saved)");
+  setQuality("—", "", "Saved. Click Start.");
+});
+
+// ---- init ----
+(async function init(){
+  setStatus("Idle");
+  setMode("Not running");
+  setLock("none");
+  setProgress("—");
+  setQuality("—", "", "—");
+
+  // start with a frame so preview isn't blank
+  const img = captureRs();
+  if (img) {
+    lastFrame = img;
+    resetViewToFit(img);
+    drawPreview(img, null, null);
+  }
+
+  anchor = await ensureAnchorLoaded();
+  updateLabels(calibratedWide);
+
+  dbg(JSON.stringify({
+    app: { version: APP_VERSION, build: BUILD_ID },
+    calibratedWide,
+    hasUserAnchor: !!loadUserAnchorIfAny()
+  }, null, 2));
+})();
