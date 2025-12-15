@@ -1,7 +1,7 @@
 // matcher.js — Alt1 only, NO a1lib
-// Exposes: loadImage, captureRs, findAnchor
+// Exposes: loadImage, captureRs, captureRegion, findAnchor
 // Works with either alt1.getRegionImage OR alt1.getRegion (base64 ARGB)
-// Adds: returnSecond => also returns secondScore (uniqueness)
+// findAnchor supports returnSecond for quality scoring.
 
 (function () {
   window.progflashCaptureDiag = {};
@@ -72,68 +72,103 @@
     });
   };
 
-  window.captureRs = function () {
+  function getRsRect() {
+    const w = alt1.rsWidth;
+    const h = alt1.rsHeight;
+    const x = alt1.rsX || 0;
+    const y = alt1.rsY || 0;
+    return { x, y, w, h };
+  }
+
+  function clampRectToRs(r) {
+    const rs = getRsRect();
+    const x = Math.max(0, Math.min(rs.w - 1, r.x));
+    const y = Math.max(0, Math.min(rs.h - 1, r.y));
+    const w = Math.max(1, Math.min(r.w, rs.w - x));
+    const h = Math.max(1, Math.min(r.h, rs.h - y));
+    return { x, y, w, h };
+  }
+
+  // Capture a region in RS capture space (fast path used by app.js)
+  // Returns wrapped image and includes _offsetX/_offsetY for mapping to RS coords.
+  window.captureRegion = function (x, y, w, h) {
     try {
-      setDiag({ when: new Date().toISOString(), stage: "start" });
+      setDiag({ when: new Date().toISOString(), stage: "captureRegion_start" });
 
       if (!window.alt1) { setDiag({ stage: "no_alt1" }); return null; }
-      if (!alt1.permissionPixel) { setDiag({ stage: "no_pixel_permission", permissionPixel: !!alt1.permissionPixel }); return null; }
+      if (!alt1.permissionPixel) { setDiag({ stage: "no_pixel_permission" }); return null; }
 
-      const w = alt1.rsWidth;
-      const h = alt1.rsHeight;
-      const x = alt1.rsX || 0;
-      const y = alt1.rsY || 0;
+      const rs = getRsRect();
+      if (!rs.w || !rs.h) { setDiag({ stage: "bad_dims" }); return null; }
+
+      const rr = clampRectToRs({ x, y, w, h });
+      const sx = rs.x + rr.x;
+      const sy = rs.y + rr.y;
 
       setDiag({
-        stage: "dims",
-        rs: { x, y, w, h },
+        stage: "captureRegion_dims",
+        rs,
+        req: rr,
+        abs: { x: sx, y: sy },
         hasGetRegion: typeof alt1.getRegion === "function",
         hasGetRegionImage: typeof alt1.getRegionImage === "function",
         maxtransfer: alt1.maxtransfer
       });
 
-      if (!w || !h) { setDiag({ stage: "bad_dims" }); return null; }
-
+      // Preferred
       if (typeof alt1.getRegionImage === "function") {
-        const img = alt1.getRegionImage(x, y, w, h);
-        if (!img || !img.data) { setDiag({ stage: "getRegionImage_failed", got: !!img }); return null; }
-        setDiag({ stage: "ok_getRegionImage" });
-        return wrapImageData(img);
+        const img = alt1.getRegionImage(sx, sy, rr.w, rr.h);
+        if (!img || !img.data) { setDiag({ stage: "getRegionImage_failed" }); return null; }
+        const wrapped = wrapImageData(img);
+        wrapped._offsetX = rr.x;
+        wrapped._offsetY = rr.y;
+        setDiag({ stage: "ok_getRegionImage_region" });
+        return wrapped;
       }
 
+      // Fallback
       if (typeof alt1.getRegion !== "function") { setDiag({ stage: "no_getRegion_api" }); return null; }
 
-      const approxBytes = w * h * 4;
+      const approxBytes = rr.w * rr.h * 4;
       if (alt1.maxtransfer && approxBytes > alt1.maxtransfer * 0.95) {
         setDiag({ stage: "too_large_for_transfer", approxBytes, maxtransfer: alt1.maxtransfer });
         return null;
       }
 
-      const b64 = alt1.getRegion(x, y, w, h);
-      if (!b64 || typeof b64 !== "string") { setDiag({ stage: "getRegion_returned_empty", type: typeof b64 }); return null; }
+      const b64 = alt1.getRegion(sx, sy, rr.w, rr.h);
+      if (!b64 || typeof b64 !== "string") { setDiag({ stage: "getRegion_returned_empty" }); return null; }
 
       const argbBytes = base64ToBytes(b64);
-      if (!argbBytes || argbBytes.length !== w * h * 4) {
-        setDiag({ stage: "decode_length_mismatch", gotLen: argbBytes ? argbBytes.length : null, expectedLen: w * h * 4 });
+      if (!argbBytes || argbBytes.length !== rr.w * rr.h * 4) {
+        setDiag({ stage: "decode_length_mismatch", gotLen: argbBytes ? argbBytes.length : null });
         return null;
       }
 
       const rgbaBytes = argbToRgbaBytes(argbBytes);
-      setDiag({ stage: "ok_getRegion" });
-      return wrapImageData({ width: w, height: h, data: rgbaBytes });
+      const wrapped = wrapImageData({ width: rr.w, height: rr.h, data: rgbaBytes });
+      wrapped._offsetX = rr.x;
+      wrapped._offsetY = rr.y;
+      setDiag({ stage: "ok_getRegion_region" });
+      return wrapped;
     } catch (e) {
-      console.error("captureRs failed:", e);
+      console.error("captureRegion failed:", e);
       setDiag({ stage: "exception", error: String(e && e.message ? e.message : e) });
       return null;
     }
   };
 
-  // opts:
-  // - tolerance (default 80)
-  // - minScore (default 0.25)
-  // - step (default 2)
-  // - ignoreAlphaBelow (default 200)
-  // - returnSecond (default false): also returns secondScore
+  // Full RS capture (keep for debug, but app.js should no longer use this per-tick)
+  window.captureRs = function () {
+    try {
+      if (!window.alt1 || !alt1.permissionPixel) return null;
+      const rs = getRsRect();
+      return window.captureRegion(0, 0, rs.w, rs.h);
+    } catch {
+      return null;
+    }
+  };
+
+  // opts: tolerance, minScore, step, ignoreAlphaBelow, returnSecond
   window.findAnchor = function (hay, needle, opts = {}) {
     if (!hay || !needle) return { ok: false, score: 0, secondScore: 0 };
 
@@ -191,5 +226,5 @@
       : { ok, x: best.x, y: best.y, score: best.score };
   };
 
-  console.log("matcher.js loaded (capture ok + secondScore)");
+  console.log("matcher.js loaded (captureRegion enabled)");
 })();
