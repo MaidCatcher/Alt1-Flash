@@ -1,6 +1,5 @@
 // matcher.js — Alt1 only, NO a1lib
 // Exposes: loadImage, captureRs, captureRegion, findAnchor
-// findAnchor supports returnSecond and secondMinDist to compute "2nd best" away from best.
 
 (function () {
   window.progflashCaptureDiag = {};
@@ -88,7 +87,7 @@
     return { x, y, w, h };
   }
 
-  // Capture a region in RS capture space (fast path used by app.js)
+  // Capture a region in RS capture space (x,y,w,h relative to RS top-left)
   window.captureRegion = function (x, y, w, h) {
     try {
       setDiag({ when: new Date().toISOString(), stage: "captureRegion_start" });
@@ -163,31 +162,21 @@
     }
   };
 
-  // opts:
-  // - tolerance (default 80)
-  // - minScore (default 0.25)
-  // - step (default 2)
-  // - ignoreAlphaBelow (default 200)
-  // - returnSecond (default false): also returns secondScore
-  // - secondMinDist (default 30): second score must be at least this far from best match
+  // Basic template match
   window.findAnchor = function (hay, needle, opts = {}) {
-    if (!hay || !needle) return { ok: false, score: 0, secondScore: 0 };
+    if (!hay || !needle) return { ok: false, score: 0 };
 
     const tol = opts.tolerance ?? 80;
     const minScore = opts.minScore ?? 0.25;
     const step = Math.max(1, opts.step ?? 2);
     const ignoreAlphaBelow = opts.ignoreAlphaBelow ?? 200;
-    const returnSecond = !!opts.returnSecond;
-    const secondMinDist = Math.max(0, opts.secondMinDist ?? 30);
 
     let best = { score: 0, x: 0, y: 0 };
-    let secondScore = 0;
 
     const maxY = hay.height - needle.height;
     const maxX = hay.width - needle.width;
-    if (maxX < 0 || maxY < 0) return { ok: false, score: 0, secondScore: 0 };
+    if (maxX < 0 || maxY < 0) return { ok: false, score: 0 };
 
-    // Pass 1: find best
     for (let y = 0; y <= maxY; y++) {
       for (let x = 0; x <= maxX; x++) {
         let good = 0, total = 0;
@@ -217,48 +206,8 @@
       }
     }
 
-    if (!returnSecond) {
-      return { ok: best.score >= minScore, x: best.x, y: best.y, score: best.score };
-    }
-
-    // Pass 2: find second-best away from best
-    const minDist2 = secondMinDist * secondMinDist;
-
-    for (let y = 0; y <= maxY; y++) {
-      for (let x = 0; x <= maxX; x++) {
-        const dx = x - best.x;
-        const dy = y - best.y;
-        if ((dx * dx + dy * dy) < minDist2) continue; // ignore near-best region
-
-        let good = 0, total = 0;
-
-        for (let ny = 0; ny < needle.height; ny += step) {
-          for (let nx = 0; nx < needle.width; nx += step) {
-            const a = needle.getPixel(nx, ny);
-            const aa = (a >>> 24) & 255;
-            if (aa < ignoreAlphaBelow) continue;
-
-            total++;
-
-            const b = hay.getPixel(x + nx, y + ny);
-
-            const dr = Math.abs((a & 255) - (b & 255));
-            const dg = Math.abs(((a >> 8) & 255) - ((b >> 8) & 255));
-            const db = Math.abs(((a >> 16) & 255) - ((b >> 16) & 255));
-
-            if (dr <= tol && dg <= tol && db <= tol) good++;
-          }
-        }
-
-        if (total === 0) continue;
-
-        const score = good / total;
-        if (score > secondScore) secondScore = score;
-      }
-    }
-
-    return { ok: best.score >= minScore, x: best.x, y: best.y, score: best.score, secondScore };
+    return { ok: best.score >= minScore, x: best.x, y: best.y, score: best.score };
   };
 
-  console.log("matcher.js loaded (secondMinDist uniqueness)");
+  console.log("matcher.js loaded (captureRegion enabled)");
 })();
