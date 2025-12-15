@@ -47,7 +47,7 @@ const MATCH = {
 const OVERLAY = {
   enabled: true,    // if alt1.permissionOverlay is true, draw scan region
   thickness: 2,
-  durationMs: 250   // redraw every tick; keep it visible
+  durationMs: 600   // redraw every tick; keep it visible
 };
 
 // Internal lock state
@@ -243,9 +243,10 @@ function tick(){
       }
     }
   } else {
-    region = getWideRegion(img);
-    drawScanOverlay(region);
-    result = runMatch(img, region, MATCH.minScoreWide);
+   region = getWideRegion(img);
+if (locked) drawScanOverlay(region);
+result = runMatch(img, region, MATCH.minScoreWide);
+
   }
 
   if (result.ok){
