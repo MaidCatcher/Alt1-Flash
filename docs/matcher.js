@@ -1,7 +1,16 @@
 // matcher.js — Alt1 only, NO a1lib
 // Exposes: loadImage, captureRs, findAnchor
+// FIXED: use alt1.getRegion (documented) instead of non-existent getRegionImage
+// Adds: window.progflashCaptureDiag for better debug output
 
 (function () {
+
+  // diagnostic object app.js will display if capture fails
+  window.progflashCaptureDiag = {};
+
+  function setDiag(patch) {
+    window.progflashCaptureDiag = Object.assign({}, window.progflashCaptureDiag, patch);
+  }
 
   function rgba(r, g, b, a = 255) {
     return (r & 255) | ((g & 255) << 8) | ((b & 255) << 16) | ((a & 255) << 24);
@@ -11,6 +20,7 @@
     return {
       width: img.width,
       height: img.height,
+      data: img.data, // keep data around (useful for diagnostics/tools)
       getPixel(x, y) {
         if (x < 0 || y < 0 || x >= img.width || y >= img.height) return 0;
         const i = (y * img.width + x) * 4;
@@ -18,6 +28,38 @@
         return rgba(d[i], d[i + 1], d[i + 2], d[i + 3]);
       }
     };
+  }
+
+  function base64ToBytes(b64) {
+    // Prefer new Uint8Array.fromBase64 if available (modern Chromium)
+    // Fallback to atob.
+    try {
+      if (typeof Uint8Array.fromBase64 === "function") {
+        return Uint8Array.fromBase64(b64);
+      }
+    } catch (_) { /* ignore */ }
+
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i) & 255;
+    return out;
+  }
+
+  function argbToRgbaBytes(argbBytes) {
+    // Alt1 getRegion returns 8bpp ARGB buffer (A,R,G,B). :contentReference[oaicite:2]{index=2}
+    // Convert to RGBA for canvas-like usage.
+    const out = new Uint8ClampedArray(argbBytes.length);
+    for (let i = 0; i < argbBytes.length; i += 4) {
+      const A = argbBytes[i + 0];
+      const R = argbBytes[i + 1];
+      const G = argbBytes[i + 2];
+      const B = argbBytes[i + 3];
+      out[i + 0] = R;
+      out[i + 1] = G;
+      out[i + 2] = B;
+      out[i + 3] = A;
+    }
+    return out;
   }
 
   // ---- Load anchor image ----
@@ -41,21 +83,91 @@
   // ---- Capture RuneScape viewport ----
   window.captureRs = function () {
     try {
-      if (!window.alt1 || !alt1.permissionPixel) return null;
-      if (typeof alt1.getRegionImage !== "function") return null;
+      setDiag({ when: new Date().toISOString(), stage: "start" });
+
+      if (!window.alt1) {
+        setDiag({ stage: "no_alt1" });
+        return null;
+      }
+      if (!alt1.permissionPixel) {
+        setDiag({ stage: "no_pixel_permission", permissionPixel: !!alt1.permissionPixel });
+        return null;
+      }
+      if (alt1.rsLinked === false) {
+        setDiag({ stage: "rs_not_linked", rsLinked: alt1.rsLinked });
+        return null;
+      }
 
       const x = alt1.rsX || 0;
       const y = alt1.rsY || 0;
       const w = alt1.rsWidth;
       const h = alt1.rsHeight;
-      if (!w || !h) return null;
 
-      const img = alt1.getRegionImage(x, y, w, h);
-      if (!img || !img.data) return null;
+      setDiag({
+        stage: "dims",
+        rs: { x, y, w, h },
+        maxtransfer: alt1.maxtransfer,
+        hasGetRegion: typeof alt1.getRegion === "function",
+        hasGetRegionImage: typeof alt1.getRegionImage === "function"
+      });
 
-      return wrapImageData(img);
+      if (!w || !h) {
+        setDiag({ stage: "bad_dims" });
+        return null;
+      }
+
+      // If some wrapper provides an ImageData-like API, use it.
+      if (typeof alt1.getRegionImage === "function") {
+        const img = alt1.getRegionImage(x, y, w, h);
+        if (!img || !img.data) {
+          setDiag({ stage: "getRegionImage_failed", got: !!img });
+          return null;
+        }
+        setDiag({ stage: "ok_getRegionImage" });
+        return wrapImageData(img);
+      }
+
+      // Documented Alt1 API: getRegion -> base64 encoded 8bpp ARGB buffer. :contentReference[oaicite:3]{index=3}
+      if (typeof alt1.getRegion !== "function") {
+        setDiag({ stage: "no_getRegion_api" });
+        return null;
+      }
+
+      // Heuristic check: huge captures can exceed transfer limits on some setups.
+      // If this triggers, you'll want to capture a smaller region instead of full viewport.
+      const approxBytes = w * h * 4;
+      if (alt1.maxtransfer && approxBytes > alt1.maxtransfer * 0.95) {
+        setDiag({
+          stage: "too_large_for_transfer",
+          approxBytes,
+          maxtransfer: alt1.maxtransfer
+        });
+        return null;
+      }
+
+      const b64 = alt1.getRegion(x, y, w, h);
+      if (!b64 || typeof b64 !== "string") {
+        setDiag({ stage: "getRegion_returned_empty", type: typeof b64 });
+        return null;
+      }
+
+      const argbBytes = base64ToBytes(b64);
+      if (!argbBytes || argbBytes.length !== w * h * 4) {
+        setDiag({
+          stage: "decode_length_mismatch",
+          gotLen: argbBytes ? argbBytes.length : null,
+          expectedLen: w * h * 4
+        });
+        return null;
+      }
+
+      const rgbaBytes = argbToRgbaBytes(argbBytes);
+      setDiag({ stage: "ok_getRegion" });
+
+      return wrapImageData({ width: w, height: h, data: rgbaBytes });
     } catch (e) {
       console.error("captureRs failed:", e);
+      setDiag({ stage: "exception", error: String(e && e.message ? e.message : e) });
       return null;
     }
   };
@@ -97,6 +209,6 @@
       : { ok: false, score: best.score };
   };
 
-  console.log("matcher.js loaded (getRegionImage)");
+  console.log("matcher.js loaded (getRegion fallback)");
 
 })();
