@@ -124,6 +124,15 @@ function drawRegionPreview(regionImg, label, matchXY, needle){
     ctx.strokeRect(fx, fy, fw, fh);
   }
 }
+function forceOpaque(img) {
+  // Ensure the template has usable alpha for matching
+  if (!img || !img.data) return img;
+  for (let i = 0; i < img.data.length; i += 4) {
+    img.data[i + 3] = 255; // force alpha to opaque
+  }
+  return img;
+}
+
 
 function findInImage(hay, needle, opts){
   const res = findAnchor(hay, needle, opts);
@@ -173,7 +182,7 @@ function stage1FindXCorner(){
           tolerance: 90,
           minScore: 0.01,
           step: 4,
-          ignoreAlphaBelow: 150,
+          ignoreAlphaBelow: 0,
           acceptScore: 0.0
         });
 
@@ -549,8 +558,9 @@ async function start(){
       }, null, 2));
       return;
     }
-    tplHourglass = hg.img;
-    tplXCorner = xc.img;
+    tplHourglass = forceOpaque(hg.img);
+	tplXCorner   = forceOpaque(xc.img);
+
   }
 
   running = true;
@@ -562,6 +572,23 @@ async function start(){
   // Otherwise auto-find
   runAutoFindOnce();
 }
+function alphaStats(img) {
+  let minA = 255, maxA = 0;
+  for (let i = 0; i < img.data.length; i += 4) {
+    const a = img.data[i + 3];
+    if (a < minA) minA = a;
+    if (a > maxA) maxA = a;
+  }
+  return { minA, maxA, w: img.width, h: img.height };
+}
+
+dbg(JSON.stringify({
+  templates: {
+    hourglass: alphaStats(tplHourglass),
+    xcorner: alphaStats(tplXCorner)
+  }
+}, null, 2));
+
 
 function stop(){
   running = false;
