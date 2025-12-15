@@ -115,16 +115,13 @@ function drawScanOverlay(region){
   const sy = (alt1.rsY || 0) + region.y;
 
   // Alt1 overlay API: alt1.overLayRect(x,y,w,h,color,thickness,time)
-  // color is ARGB int. We'll use:
-  // - WIDE: 0xA000FF00 (semi-green)
-  // - TRACK: 0xA0FFAA00 (semi-orange)
+  // color is ARGB int.
   const color = region.mode === "TRACK" ? 0xA0FFAA00 : 0xA000FF00;
 
   try {
     if (typeof alt1.overLayRect === "function") {
       alt1.overLayRect(sx, sy, region.w, region.h, color, OVERLAY.thickness, OVERLAY.durationMs);
     }
-    // Optional: label it if available
     if (typeof alt1.overLayText === "function") {
       alt1.overLayText(region.mode, sx + 6, sy + 6, color, OVERLAY.durationMs);
     }
@@ -140,7 +137,6 @@ async function start(){
     return;
   }
 
-  // show basic Alt1 state right away
   dbg(JSON.stringify({
     alt1: true,
     permissionPixel: !!alt1.permissionPixel,
@@ -164,11 +160,12 @@ async function start(){
 
   if (!anchor){
     setStatus("Loading anchor…");
-    anchor = await loadImage("img/anchortest.png?v=" + Date.now());
+    // ✅ FIX: use your real filename
+    anchor = await loadImage("img/progbar_anchor.png?v=" + Date.now());
   }
   if (!anchor){
     setStatus("Anchor load failed");
-    dbg("Could not load img/anchortest.png (check path + case).");
+    dbg("Could not load img/progbar_anchor.png (check path + case).");
     return;
   }
 
@@ -225,9 +222,6 @@ function tick(){
     return;
   }
 
-  // Decide scan mode
-  // If locked: try TRACK first (small region = less lag)
-  // If TRACK fails: fall back to WIDE to reacquire
   let region, result;
 
   if (locked) {
@@ -237,7 +231,6 @@ function tick(){
     result = runMatch(img, region, MATCH.minScoreTrack);
 
     if (!result.ok) {
-      // reacquire
       const wide = getWideRegion(img);
       drawScanOverlay(wide);
       const reacq = runMatch(img, wide, MATCH.minScoreWide);
@@ -246,7 +239,6 @@ function tick(){
         result = reacq;
         region = wide;
       } else {
-        // lost lock
         locked = false;
       }
     }
@@ -270,7 +262,7 @@ function tick(){
       scanRegion: { x: region.x, y: region.y, w: region.w, h: region.h },
       anchor: { w: anchor.width, h: anchor.height },
       res: { ok: true, x: result.x, y: result.y, score: result.score },
-      tracking: locked ? { lastX: lastLock.x, lastY: lastLock.y, lastScore: lastLock.score } : null
+      tracking: { lastX: lastLock.x, lastY: lastLock.y, lastScore: lastLock.score }
     }, null, 2));
   } else {
     setStatus("Searching…");
