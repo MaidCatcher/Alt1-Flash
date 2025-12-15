@@ -141,6 +141,64 @@ const STAGE1 = {
   minScore: 0.0,     // not used anymore for gating
   earlyScore: 0.80
 };
+function stage1FindXCorner(){
+  const rs = getRsSize();
+  if (!rs.w || !rs.h) return null;
+
+  // Top half first, then bottom half
+  const halves = [
+    { name: "TOP",    y0: 0,                y1: Math.floor(rs.h / 2) },
+    { name: "BOTTOM", y0: Math.floor(rs.h / 2), y1: rs.h }
+  ];
+
+  // X-corner should match much higher than hourglass ever did.
+  const minAccept = 0.55;
+
+  let best = { score: 0, absX: 0, absY: 0, half: "TOP" };
+
+  for (const half of halves) {
+    let tileIndex = 0;
+
+    for (let ty = half.y0; ty < half.y1; ty += STAGE1.tileH) {
+      for (let tx = 0; tx < rs.w; tx += STAGE1.tileW) {
+        tileIndex++;
+
+        const w = Math.min(STAGE1.tileW, rs.w - tx);
+        const h = Math.min(STAGE1.tileH, half.y1 - ty);
+
+        const cap = captureRect({ x: tx, y: ty, w, h });
+        if (!cap.img) continue;
+
+        const m = findInImage(cap.img, tplXCorner, {
+          tolerance: 90,
+          minScore: 0.01,
+          step: 4,
+          ignoreAlphaBelow: 150,
+          acceptScore: 0.0
+        });
+
+        drawRegionPreview(
+          cap.img,
+          `STAGE1 ${half.name} tile#${tileIndex} (${tx},${ty}) best=${best.score.toFixed(2)} cur=${m.score.toFixed(2)}`,
+          (m.ok ? { x: m.x, y: m.y } : null),
+          tplXCorner
+        );
+
+        if (m.score > best.score) {
+          best = { score: m.score, absX: tx + m.x, absY: ty + m.y, half: half.name };
+          if (best.score >= 0.85) return best; // early exit on very strong match
+        }
+      }
+    }
+
+    // Prefer top if already acceptable
+    if (best.half === "TOP" && best.score >= minAccept) return best;
+  }
+
+  if (best.score < minAccept) return null;
+  return best;
+}
+
 
 
 const STAGE2 = {
@@ -451,7 +509,8 @@ function runAutoFindOnce(){
   schedule(0, () => {
     if (!running) return;
 
-    const s1 = stage1FindHourglass();
+    const s1 = stage1FindXCorner();
+
     if (!s1) {
   setStatus("Auto-find: not found yet (retrying)...");
   dbg(JSON.stringify({ stage1: "fail", note: "Will retry in 600ms" }, null, 2));
@@ -460,22 +519,11 @@ function runAutoFindOnce(){
 }
 
 
-    setStatus(`Stage 1 found (score ${s1.score.toFixed(2)}). Stage 2…`);
+    setStatus(`Found progress window (score ${s1.score.toFixed(2)}). Locking…`);
 
-    schedule(0, () => {
-      if (!running) return;
+saveUserLockAnchorFromXCorner(s1.absX, s1.absY);
+setLockedAt(s1.absX, s1.absY, `Locked via X-corner (score ${s1.score.toFixed(2)}).`);
 
-      const s2 = stage2FindXCornerNear(s1.absX, s1.absY);
-      if (!s2) {
-        setStatus("Auto-find failed (stage 2)");
-        dbg(JSON.stringify({ stage1: s1, stage2: "fail" }, null, 2));
-        return;
-      }
-
-      // Save lock and also store a user-specific corner chunk for future verify
-      saveUserLockAnchorFromXCorner(s2.absX, s2.absY);
-      setLockedAt(s2.absX, s2.absY, `Locked via Stage2 x_corner (score ${s2.score.toFixed(2)}).`);
-    });
   });
 }
 
