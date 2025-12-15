@@ -1,4 +1,5 @@
-// app.js — scan-region overlay + lock tracking + visible version/build
+// app.js — scan region overlay + lock tracking + "FOUND" overlay + version/build display
+// Requires matcher.js exposing: captureRs, findAnchor, loadImage
 
 const statusEl = document.getElementById("status");
 const modeEl   = document.getElementById("mode");
@@ -23,14 +24,20 @@ let running = false;
 let loop = null;
 let anchor = null;
 
-// WIDE region (set these how you want)
+// ----------------- CONFIG -----------------
+
+// ✅ IMPORTANT: This controls WHERE it searches before lock.
+// I set this to TOP by default to stop "bottom-only" behavior.
+//
+// If your progress bar is actually bottom-right, switch yFrom back to "bottom".
 const WIDE = {
-  xFrom: "right",   // "left" | "right"
-  xPx: 900,
-  yFrom: "bottom",  // "top" | "bottom"
-  yPx: 260
+  xFrom: "left",   // "left" | "right"
+  xPx: 1920,       // scan width (use full width if unsure)
+  yFrom: "top",    // "top" | "bottom"
+  yPx: 380         // scan height band
 };
 
+// After lock, track near last position (small box => low lag)
 const TRACK = {
   padX: 220,
   padY: 140,
@@ -38,16 +45,23 @@ const TRACK = {
   minH: 220
 };
 
+// Matching thresholds
 const MATCH = {
   tolerance: 65,
-  minScoreWide: 0.65,
-  minScoreTrack: 0.70
+  minScoreWide: 0.72,   // tightened so false positives are less likely
+  minScoreTrack: 0.78
 };
 
+// Overlay behavior
 const OVERLAY = {
   enabled: true,
-  thickness: 2
+  thickness: 2,
+  showWide: true,      // show green WIDE scan box
+  showTrack: true,     // show orange TRACK scan box
+  showFound: true      // show blue box where the match is
 };
+
+// ------------------------------------------
 
 let locked = false;
 let lastLock = { x: 0, y: 0, score: 0 };
@@ -99,31 +113,50 @@ function getTrackRegion(img){
   return { x, y, w, h, mode: "TRACK" };
 }
 
-// Correct Alt1 overlay call order + throttling
+// ---- Overlay helpers (correct Alt1 arg order) ----
 let lastOverlayDraw = 0;
-function drawScanOverlay(region){
+function overlayRect(color, x, y, w, h, label){
   if (!OVERLAY.enabled) return;
   if (!window.alt1) return;
   if (!alt1.permissionOverlay) return;
 
+  // global throttle for overlays (reduces focus weirdness)
   const now = Date.now();
-  if (now - lastOverlayDraw < 700) return;
+  if (now - lastOverlayDraw < 250) return;
   lastOverlayDraw = now;
 
-  const sx = (alt1.rsX || 0) + region.x;
-  const sy = (alt1.rsY || 0) + region.y;
-
-  const color = region.mode === "TRACK" ? 0xA0FFAA00 : 0xA000FF00;
+  const sx = (alt1.rsX || 0) + x;
+  const sy = (alt1.rsY || 0) + y;
 
   try {
     if (typeof alt1.overLayRect === "function") {
-      alt1.overLayRect(color, sx, sy, region.w, region.h, 900, OVERLAY.thickness);
+      // overLayRect(color, x, y, w, h, time, lineWidth)
+      alt1.overLayRect(color, sx, sy, w, h, 700, OVERLAY.thickness);
     }
-    if (typeof alt1.overLayText === "function") {
-      alt1.overLayText(region.mode, color, 14, sx + 6, sy + 6, 900);
+    if (label && typeof alt1.overLayText === "function") {
+      // overLayText(str, color, size, x, y, time)
+      alt1.overLayText(label, color, 14, sx + 6, sy + 6, 700);
     }
   } catch (_) {}
 }
+
+function drawScanOverlay(region){
+  if (region.mode === "WIDE" && !OVERLAY.showWide) return;
+  if (region.mode === "TRACK" && !OVERLAY.showTrack) return;
+
+  const color = (region.mode === "TRACK") ? 0xA0FFAA00 : 0xA000FF00;
+  overlayRect(color, region.x, region.y, region.w, region.h, region.mode);
+}
+
+function drawFoundOverlay(foundX, foundY){
+  if (!OVERLAY.showFound) return;
+  if (!anchor) return;
+
+  // blue-ish box around the matched anchor itself
+  overlayRect(0xA00088FF, foundX, foundY, anchor.width, anchor.height, "FOUND");
+}
+
+// ---- Main logic ----
 
 async function start(){
   if (!window.alt1){
@@ -216,7 +249,9 @@ function tick(){
     result = runMatch(img, region, MATCH.minScoreTrack);
 
     if (!result.ok) {
+      // reacquire
       const wide = getWideRegion(img);
+      drawScanOverlay(wide);
       const reacq = runMatch(img, wide, MATCH.minScoreWide);
 
       if (reacq.ok) {
@@ -228,7 +263,7 @@ function tick(){
     }
   } else {
     region = getWideRegion(img);
-    // No overlay while searching (more stable for everyone)
+    drawScanOverlay(region);
     result = runMatch(img, region, MATCH.minScoreWide);
   }
 
@@ -239,6 +274,8 @@ function tick(){
     setStatus("Locked");
     setLock(`x=${result.x}, y=${result.y}`);
     setProgress("locked");
+
+    drawFoundOverlay(result.x, result.y);
 
     dbg(JSON.stringify({
       app: { version: APP_VERSION, build: BUILD_ID },
@@ -254,7 +291,7 @@ function tick(){
     setProgress("—");
 
     dbg(JSON.stringify({
-      app: { version: APP_VERSION, build: BUILD_ID },
+      app: { version: APP_VERSION, build: APP_VERSION },
       scanMode: region.mode,
       capture: { w: img.width, h: img.height },
       scanRegion: { x: region.x, y: region.y, w: region.w, h: region.h },
@@ -272,6 +309,4 @@ setStatus("Idle");
 setMode("Not running");
 setLock("none");
 setProgress("—");
-
-// Show version immediately in debug too
 dbg(JSON.stringify({ app: { version: APP_VERSION, build: BUILD_ID } }, null, 2));
