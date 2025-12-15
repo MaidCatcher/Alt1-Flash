@@ -6,53 +6,24 @@
   <title>ProgFlash</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 12px; }
-    .row { margin-bottom: 10px; }
     button { margin-right: 6px; }
-    #debugBox {
-      white-space: pre;
-      border: 1px solid #ccc;
-      padding: 8px;
-      height: 260px;
-      overflow: auto;
-      background: #fff;
-    }
-    #versionBar {
-      font-size: 12px;
-      opacity: 0.85;
-      margin-top: 6px;
-      line-height: 1.4;
-    }
+    #versionBar { font-size: 12px; opacity: 0.85; margin-top: 6px; line-height: 1.35; }
     #versionBar code { font-family: Consolas, monospace; }
-    #previewWrap {
-      margin-top: 10px;
-      border: 1px solid #ccc;
-      padding: 8px;
-      background: #fafafa;
-    }
+    #previewWrap { margin-top: 10px; border: 1px solid #ccc; padding: 8px; background: #fafafa; }
     #previewTitle { font-size: 12px; margin-bottom: 6px; opacity: 0.85; }
-    #previewCanvas {
-      border: 1px solid #999;
-      background: #000;
-      image-rendering: pixelated;
-      display: block;
-    }
-    #hint {
-      font-size: 12px;
-      margin-top: 6px;
-      opacity: 0.9;
-      line-height: 1.35;
-    }
+    #previewCanvas { border: 1px solid #999; background: #000; image-rendering: pixelated; display: block; }
+    #debugBox { white-space: pre; border: 1px solid #ccc; padding: 8px; height: 260px; overflow: auto; background: #fff; }
   </style>
 </head>
 
 <body>
   <h2>ProgFlash</h2>
 
-  <div class="row">
+  <div>
     <button id="startBtn">Start</button>
     <button id="stopBtn">Stop</button>
-    <button id="autoFindBtn" title="Scan for the progress window and save its position.">Auto find</button>
-    <button id="clearLockBtn" title="Forget the saved lock position.">Clear lock</button>
+    <button id="autoFindBtn">Auto find</button>
+    <button id="clearLockBtn">Clear lock</button>
     <button id="testFlashBtn">Test flash</button>
 
     <div id="versionBar">
@@ -63,25 +34,23 @@
     </div>
   </div>
 
-  <div class="row">
-    <div>Status: <span id="status">Idle</span></div>
-    <div>Mode: <span id="mode">Not running</span></div>
-    <div>Lock: <span id="lock">none</span></div>
-    <div>Progress: <span id="progress">—</span></div>
-  </div>
+  <pre>
+Status: <span id="status">Idle</span>
+Mode: <span id="mode">Not running</span>
+Lock: <span id="lock">none</span>
+Progress: <span id="progress">—</span>
+  </pre>
 
   <div id="previewWrap">
-    <div id="previewTitle">Capture preview (scan/verify region)</div>
+    <div id="previewTitle">Capture preview (stage scan / verify)</div>
     <canvas id="previewCanvas" width="520" height="320"></canvas>
-    <div id="hint">
-      Goal: Auto-find once, save the position, then stop scanning. Use <b>Auto find</b> if it ever needs re-finding.
-    </div>
   </div>
 
   <div style="margin-top:10px;"><b>Debug</b></div>
   <pre id="debugBox"></pre>
 
   <script>
+    // Cache buster build id
     window.APP_VERSION = "0.5.1";
     window.BUILD_ID = "build-" + Date.now();
 
