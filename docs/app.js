@@ -1,4 +1,4 @@
-// app.js — Preview-based calibration + on-canvas scan debug box + bestScore debug
+// app.js — Preview-based calibration (drag rectangle) + on-canvas scan debug box + bestScore debug
 
 const statusEl = document.getElementById("status");
 const modeEl   = document.getElementById("mode");
@@ -41,10 +41,14 @@ let lastBestScore = 0;
 
 let calibrateArmed = false;
 
-// ---- config ----
-const CALIB = { boxW: 1200, boxH: 520 };   // WIDE box size after calibration
-const TRACK = { padX: 220, padY: 140, minW: 420, minH: 220 };
+// Drag-to-calibrate state (in CANVAS coords)
+let drag = {
+  active: false,
+  sx: 0, sy: 0,
+  ex: 0, ey: 0
+};
 
+// ---- config ----
 const MATCH = {
   tolerance: 80,
   minScoreWide: 0.62,
@@ -53,9 +57,11 @@ const MATCH = {
   ignoreAlphaBelow: 200
 };
 
-// Preview update rate (avoid lag)
+const TRACK = { padX: 220, padY: 140, minW: 420, minH: 220 };
+
+// Preview update rate
 let lastPreviewDraw = 0;
-const PREVIEW_MS = 250; // 4 fps
+const PREVIEW_MS = 250;
 
 // Used to map canvas clicks to capture coords
 let previewMap = { scale: 1, offX: 0, offY: 0, drawW: 0, drawH: 0, srcW: 0, srcH: 0 };
@@ -80,7 +86,7 @@ function updateCalibLabel(){
   calibWideEl.textContent = calibratedWide
     ? `x=${calibratedWide.x},y=${calibratedWide.y},w=${calibratedWide.w},h=${calibratedWide.h}`
     : "none";
-  if (calibModeEl) calibModeEl.textContent = calibrateArmed ? "ARMED (click preview)" : "off";
+  if (calibModeEl) calibModeEl.textContent = calibrateArmed ? "ARMED (drag on preview)" : "off";
 }
 
 function clampRegion(img, r){
@@ -96,7 +102,6 @@ function getWideRegion(img){
     const r = clampRegion(img, calibratedWide);
     return { ...r, mode: "WIDE(CALIB)" };
   }
-  // fallback full screen
   return { x: 0, y: 0, w: img.width, h: img.height, mode: "WIDE(FULL)" };
 }
 
@@ -130,19 +135,16 @@ function cropView(img, ox, oy, w, h){
     height: ch,
     _offsetX: x0,
     _offsetY: y0,
-    data: img.data, // not used for matching, but keep consistent
-    getPixel(x, y){
-      return img.getPixel(x0 + x, y0 + y);
-    }
+    getPixel(x, y){ return img.getPixel(x0 + x, y0 + y); }
   };
 }
 
-// Match but always show bestScore
+// Match but always return bestScore
 function runMatch(img, region, acceptScore){
   const hay = cropView(img, region.x, region.y, region.w, region.h);
   const res = findAnchor(hay, anchor, {
     tolerance: MATCH.tolerance,
-    minScore: 0.01,            // always compute best
+    minScore: 0.01,
     step: MATCH.step,
     ignoreAlphaBelow: MATCH.ignoreAlphaBelow
   });
@@ -161,11 +163,9 @@ function drawPreview(img, scanRegion, found){
   if (now - lastPreviewDraw < PREVIEW_MS) return;
   lastPreviewDraw = now;
 
-  // Build ImageData from img.data (already RGBA)
   const srcW = img.width, srcH = img.height;
   const imageData = new ImageData(new Uint8ClampedArray(img.data), srcW, srcH);
 
-  // Fit to canvas with aspect ratio
   const cw = canvas.width, ch = canvas.height;
   const scale = Math.min(cw / srcW, ch / srcH);
   const drawW = Math.floor(srcW * scale);
@@ -175,17 +175,15 @@ function drawPreview(img, scanRegion, found){
 
   previewMap = { scale, offX, offY, drawW, drawH, srcW, srcH };
 
-  // Clear + draw
   ctx.clearRect(0, 0, cw, ch);
 
-  // Draw scaled image (drawImage needs a bitmap; use temp canvas)
   const tmp = document.createElement("canvas");
   tmp.width = srcW; tmp.height = srcH;
   const tctx = tmp.getContext("2d", { willReadFrequently: true });
   tctx.putImageData(imageData, 0, 0);
   ctx.drawImage(tmp, 0, 0, srcW, srcH, offX, offY, drawW, drawH);
 
-  // Draw scan region box
+  // Scan region box
   if (scanRegion) {
     const rx = offX + Math.floor(scanRegion.x * scale);
     const ry = offY + Math.floor(scanRegion.y * scale);
@@ -197,13 +195,13 @@ function drawPreview(img, scanRegion, found){
     ctx.strokeRect(rx, ry, rw, rh);
 
     ctx.fillStyle = "rgba(0,0,0,0.6)";
-    ctx.fillRect(rx, ry - 16, 130, 16);
+    ctx.fillRect(rx, Math.max(0, ry - 16), 150, 16);
     ctx.fillStyle = "white";
     ctx.font = "12px Arial";
-    ctx.fillText(scanRegion.mode, rx + 4, ry - 4);
+    ctx.fillText(scanRegion.mode, rx + 4, Math.max(12, ry - 4));
   }
 
-  // Draw FOUND box (exact match area)
+  // Found box
   if (found && anchor) {
     const fx = offX + Math.floor(found.x * scale);
     const fy = offY + Math.floor(found.y * scale);
@@ -215,38 +213,96 @@ function drawPreview(img, scanRegion, found){
     ctx.strokeRect(fx, fy, fw, fh);
   }
 
-  // Calibration hint
+  // Calibration drag overlay
   if (calibrateArmed) {
     ctx.fillStyle = "rgba(0,0,0,0.65)";
     ctx.fillRect(6, 6, cw - 12, 22);
     ctx.fillStyle = "white";
     ctx.font = "12px Arial";
-    ctx.fillText("CALIBRATE: click on the preview where the progress bar is", 12, 22);
+    ctx.fillText("CALIBRATE: drag a box around the progress bar in this preview", 12, 22);
+
+    if (drag.active) {
+      const x = Math.min(drag.sx, drag.ex);
+      const y = Math.min(drag.sy, drag.ey);
+      const w = Math.abs(drag.ex - drag.sx);
+      const h = Math.abs(drag.ey - drag.sy);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "yellow";
+      ctx.strokeRect(x, y, w, h);
+    }
   }
 }
 
-// Canvas click = calibration target when armed
-canvas.addEventListener("click", (ev) => {
-  if (!calibrateArmed) return;
-
-  const rect = canvas.getBoundingClientRect();
-  const mx = ev.clientX - rect.left;
-  const my = ev.clientY - rect.top;
-
+function canvasToCapture(mx, my){
   const { scale, offX, offY, drawW, drawH, srcW, srcH } = previewMap;
-  if (!scale || drawW <= 0 || drawH <= 0) return;
+  if (!scale || drawW <= 0 || drawH <= 0) return null;
 
-  // Ignore clicks outside the drawn image area
-  if (mx < offX || my < offY || mx > offX + drawW || my > offY + drawH) return;
+  if (mx < offX || my < offY || mx > offX + drawW || my > offY + drawH) return null;
 
   const cx = Math.floor((mx - offX) / scale);
   const cy = Math.floor((my - offY) / scale);
 
-  // Set wide box centered on click
-  const x = Math.max(0, Math.floor(cx - CALIB.boxW / 2));
-  const y = Math.max(0, Math.floor(cy - CALIB.boxH / 2));
+  // Clamp to capture bounds
+  return {
+    x: Math.max(0, Math.min(srcW - 1, cx)),
+    y: Math.max(0, Math.min(srcH - 1, cy))
+  };
+}
 
-  calibratedWide = { x, y, w: CALIB.boxW, h: CALIB.boxH };
+// Drag calibration handlers
+canvas.addEventListener("mousedown", (ev) => {
+  if (!calibrateArmed) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx = ev.clientX - rect.left;
+  const my = ev.clientY - rect.top;
+  drag.active = true;
+  drag.sx = mx; drag.sy = my;
+  drag.ex = mx; drag.ey = my;
+});
+
+canvas.addEventListener("mousemove", (ev) => {
+  if (!calibrateArmed || !drag.active) return;
+  const rect = canvas.getBoundingClientRect();
+  drag.ex = ev.clientX - rect.left;
+  drag.ey = ev.clientY - rect.top;
+});
+
+canvas.addEventListener("mouseup", (ev) => {
+  if (!calibrateArmed || !drag.active) return;
+  drag.active = false;
+
+  const rect = canvas.getBoundingClientRect();
+  const mx2 = ev.clientX - rect.left;
+  const my2 = ev.clientY - rect.top;
+
+  const x1 = Math.min(drag.sx, mx2);
+  const y1 = Math.min(drag.sy, my2);
+  const x2 = Math.max(drag.sx, mx2);
+  const y2 = Math.max(drag.sy, my2);
+
+  const p1 = canvasToCapture(x1, y1);
+  const p2 = canvasToCapture(x2, y2);
+
+  if (!p1 || !p2) {
+    setStatus("Calibrate failed");
+    dbg("Drag inside the preview image area.");
+    return;
+  }
+
+  // Create calibrated region from drag box
+  let rx = Math.min(p1.x, p2.x);
+  let ry = Math.min(p1.y, p2.y);
+  let rw = Math.max(1, Math.abs(p2.x - p1.x));
+  let rh = Math.max(1, Math.abs(p2.y - p1.y));
+
+  // Add a little padding so it doesn't miss if bar moves slightly
+  const pad = 40;
+  rx = Math.max(0, rx - pad);
+  ry = Math.max(0, ry - pad);
+  rw = rw + pad * 2;
+  rh = rh + pad * 2;
+
+  calibratedWide = { x: rx, y: ry, w: rw, h: rh };
   saveCalibWide(calibratedWide);
 
   calibrateArmed = false;
@@ -255,14 +311,12 @@ canvas.addEventListener("click", (ev) => {
   setStatus("Calibrated");
   dbg(JSON.stringify({
     app: { version: APP_VERSION, build: BUILD_ID },
-    note: "Calibration set from preview click",
-    clickCaptureCoords: { x: cx, y: cy },
+    note: "Calibration set from drag box on preview",
     calibratedWide
   }, null, 2));
 });
 
 async function loadAnchorSmart(){
-  // Try both locations (people host differently)
   const try1 = await loadImage("img/progbar_anchor.png?v=" + encodeURIComponent(BUILD_ID));
   if (try1) return try1;
   const try2 = await loadImage("progbar_anchor.png?v=" + encodeURIComponent(BUILD_ID));
@@ -330,13 +384,7 @@ function tick(){
   const img = captureRs();
   if (!img){
     setStatus("Capture failed");
-    dbg(JSON.stringify({
-      app: { version: APP_VERSION, build: BUILD_ID },
-      alt1: !!window.alt1,
-      permissionPixel: window.alt1 ? !!alt1.permissionPixel : false,
-      permissionOverlay: window.alt1 ? !!alt1.permissionOverlay : false,
-      rsLinked: window.alt1 ? !!alt1.rsLinked : undefined
-    }, null, 2));
+    dbg("captureRs(): null\n\n" + JSON.stringify(window.progflashCaptureDiag || {}, null, 2));
     return;
   }
 
@@ -347,7 +395,6 @@ function tick(){
     result = runMatch(img, region, MATCH.minScoreTrack);
 
     if (!result.ok) {
-      // reacquire in WIDE
       const wide = getWideRegion(img);
       const reacq = runMatch(img, wide, MATCH.minScoreWide);
       region = wide;
@@ -405,8 +452,9 @@ stopBtn.onclick = () => stop();
 
 calibBtn.onclick = () => {
   calibrateArmed = !calibrateArmed;
+  drag.active = false;
   updateCalibLabel();
-  setStatus(calibrateArmed ? "Calibrate: click preview" : "Idle");
+  setStatus(calibrateArmed ? "Calibrate: drag on preview" : "Idle");
 };
 
 // Init UI
