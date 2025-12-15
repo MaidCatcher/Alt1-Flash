@@ -136,11 +136,12 @@ function findInImage(hay, needle, opts){
 const STAGE1 = {
   tileW: 640,
   tileH: 360,
-  step: 4,          // a little finer than 5
-  tolerance: 105,   // more forgiving for lighting
-  minScore: 0.48,   // easier to "seed"
-  earlyScore: 0.82
+  step: 3,
+  tolerance: 115,
+  minScore: 0.0,     // not used anymore for gating
+  earlyScore: 0.80
 };
+
 
 const STAGE2 = {
   localW: 900,
@@ -315,13 +316,15 @@ function stage1FindHourglass(){
   const rs = getRsSize();
   if (!rs.w || !rs.h) return null;
 
-  // Scan order: top half first, then bottom half
   const halves = [
-    { name: "TOP",    y0: 0,               y1: Math.floor(rs.h / 2) },
+    { name: "TOP",    y0: 0,                y1: Math.floor(rs.h / 2) },
     { name: "BOTTOM", y0: Math.floor(rs.h / 2), y1: rs.h }
   ];
 
-  let best = null;
+  // Stage1 is just a hint. We'll pass to stage2 if it's "kinda close".
+  const minPassToStage2 = 0.33;
+
+  let best = { score: 0, absX: 0, absY: 0, half: "TOP", tile: null, rel: null };
 
   for (const half of halves) {
     let tileIndex = 0;
@@ -336,40 +339,48 @@ function stage1FindHourglass(){
         const cap = captureRect({ x: tx, y: ty, w, h });
         if (!cap.img) continue;
 
-        const m = findInImage(cap.img, tplHourglass, {
+        const m = findAnchor(cap.img, tplHourglass, {
           tolerance: STAGE1.tolerance,
           minScore: 0.01,
           step: STAGE1.step,
-          ignoreAlphaBelow: 140,          // <-- IMPORTANT: more forgiving on glow/alpha
-          acceptScore: STAGE1.minScore
+          ignoreAlphaBelow: 120
         });
 
-        // Show EXACTLY what we're scanning
+        const score = (m && typeof m.score === "number") ? m.score : 0;
+
+        // show what tile we are on + current best
         drawRegionPreview(
           cap.img,
-          `STAGE1 ${half.name} tile#${tileIndex} (${tx},${ty})`,
-          m.ok ? { x:m.x, y:m.y } : null,
+          `STAGE1 ${half.name} tile#${tileIndex} (${tx},${ty}) best=${best.score.toFixed(2)} cur=${score.toFixed(2)}`,
+          (m && m.ok) ? { x: m.x, y: m.y } : null,
           tplHourglass
         );
 
-        if (m.ok) {
-          const absX = tx + m.x;
-          const absY = ty + m.y;
-          best = { absX, absY, score: m.score, half: half.name };
+        if (score > best.score) {
+          best = {
+            score,
+            absX: tx + (m?.x ?? 0),
+            absY: ty + (m?.y ?? 0),
+            half: half.name,
+            tile: { x: tx, y: ty, w, h },
+            rel: { x: m?.x ?? 0, y: m?.y ?? 0 }
+          };
 
-          // Early exit if it's a very strong match
-          if (m.score >= STAGE1.earlyScore) return best;
+          // if it's really strong, short-circuit early
+          if (best.score >= STAGE1.earlyScore) return best;
         }
       }
     }
 
-    // If we got any result in top half, prefer it over scanning bottom half
-    // (You can remove this if you want best-of-both-halves.)
-    if (best && best.half === "TOP") return best;
+    // Prefer top-half if it's already "good enough"
+    if (best.score >= minPassToStage2 && best.half === "TOP") return best;
   }
 
+  // If we never got anything decent, return null (true fail)
+  if (best.score < minPassToStage2) return null;
   return best;
 }
+
 
 
 // --- Stage 2: local scan for X-corner near stage1 hit ---
