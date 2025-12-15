@@ -188,8 +188,14 @@
         for (let ny = 0; ny < needle.height; ny += 2) {
           for (let nx = 0; nx < needle.width; nx += 2) {
             total++;
-            const a = needle.getPixel(nx, ny);
-            const b = hay.getPixel(x + nx, y + ny);
+          const a = needle.getPixel(nx, ny);
+const alpha = (a >>> 24) & 255;
+
+// IGNORE transparent / semi-transparent anchor pixels
+if (alpha < 200) continue;
+
+const b = hay.getPixel(x + nx, y + ny);
+
 
             const dr = Math.abs((a & 255) - (b & 255));
             const dg = Math.abs(((a >> 8) & 255) - ((b >> 8) & 255));
