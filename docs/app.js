@@ -104,31 +104,42 @@ function getTrackRegion(img){
 }
 
 // Draw a rectangle on the RS client showing scan area
+let lastOverlayDraw = 0;
+
 function drawScanOverlay(region){
   if (!OVERLAY.enabled) return;
   if (!window.alt1) return;
   if (!alt1.permissionOverlay) return;
 
+  // Throttle overlay drawing so it doesn't spam the compositor
+  const now = Date.now();
+  if (now - lastOverlayDraw < 700) return;
+  lastOverlayDraw = now;
+
   // region is in CAPTURE coords (within RS viewport)
-  // convert to screen coords: rsX/rsY is the RS viewport offset on the monitor
   const sx = (alt1.rsX || 0) + region.x;
   const sy = (alt1.rsY || 0) + region.y;
 
-  // Alt1 overlay API: alt1.overLayRect(x,y,w,h,color,thickness,time)
-  // color is ARGB int.
+  // Alt1 expects "8bpp rgba int" – the help page calls it that.
+  // We'll use ARGB-style constants commonly used in Alt1 examples.
   const color = region.mode === "TRACK" ? 0xA0FFAA00 : 0xA000FF00;
 
   try {
     if (typeof alt1.overLayRect === "function") {
-      alt1.overLayRect(sx, sy, region.w, region.h, color, OVERLAY.thickness, OVERLAY.durationMs);
+      // ✅ Correct parameter order per Alt1 help output:
+      // overLayRect(color, x, y, w, h, time, lineWidth) :contentReference[oaicite:2]{index=2}
+      alt1.overLayRect(color, sx, sy, region.w, region.h, 900, OVERLAY.thickness);
     }
+
     if (typeof alt1.overLayText === "function") {
-      alt1.overLayText(region.mode, sx + 6, sy + 6, color, OVERLAY.durationMs);
+      // overLayText(str, color, size, x, y, time) :contentReference[oaicite:3]{index=3}
+      alt1.overLayText(region.mode, color, 14, sx + 6, sy + 6, 900);
     }
-  } catch (e) {
-    // Don’t crash if overlay call fails
+  } catch (_) {
+    // ignore overlay failures
   }
 }
+
 
 async function start(){
   if (!window.alt1){
@@ -243,9 +254,9 @@ function tick(){
       }
     }
   } else {
-   region = getWideRegion(img);
-if (locked) drawScanOverlay(region);
-result = runMatch(img, region, MATCH.minScoreWide);
+    region = getWideRegion(img);
+	if (locked) drawScanOverlay(region);
+	result = runMatch(img, region, MATCH.minScoreWide);
 
   }
 
