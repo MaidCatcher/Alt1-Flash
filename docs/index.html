@@ -12,7 +12,7 @@
       white-space: pre;
       border: 1px solid #ccc;
       padding: 8px;
-      height: 440px;
+      height: 260px;
       overflow: auto;
       background: #fff;
     }
@@ -23,6 +23,24 @@
       line-height: 1.4;
     }
     #versionBar code { font-family: Consolas, monospace; }
+    #previewWrap {
+      margin-top: 10px;
+      border: 1px solid #ccc;
+      padding: 8px;
+      background: #fafafa;
+    }
+    #previewTitle { font-size: 12px; margin-bottom: 6px; opacity: 0.85; }
+    #previewCanvas {
+      border: 1px solid #999;
+      background: #000;
+      image-rendering: pixelated;
+      display: block;
+    }
+    #hint {
+      font-size: 12px;
+      margin-top: 6px;
+      opacity: 0.85;
+    }
   </style>
 </head>
 
@@ -33,13 +51,14 @@
     <button id="startBtn">Start</button>
     <button id="stopBtn">Stop</button>
     <button id="testFlashBtn">Test flash</button>
-    <button id="calibrateBtn" title="Hover your mouse over the progress bar and click this.">Calibrate</button>
+    <button id="calibrateBtn" title="Click once to arm, then click on the preview where the progress bar is.">Calibrate</button>
 
     <div id="versionBar">
       Version: <code id="appVersion">unknown</code> |
       Build: <code id="appBuild">unknown</code> |
       Loaded: <code id="loadedAt">unknown</code><br/>
-      Calibrated WIDE: <code id="calibWide">none</code>
+      Calibrated WIDE: <code id="calibWide">none</code> |
+      Calibrate mode: <code id="calibMode">off</code>
     </div>
   </div>
 
@@ -50,13 +69,20 @@
     <div>Progress: <span id="progress">—</span></div>
   </div>
 
-  <div id="debugBox"></div>
+  <div id="previewWrap">
+    <div id="previewTitle">Capture preview (scan region is drawn here)</div>
+    <canvas id="previewCanvas" width="340" height="180"></canvas>
+    <div id="hint">
+      Tip: Click <b>Calibrate</b>, then click on this preview where the progress bar is. That sets the search box.
+    </div>
+  </div>
 
-  <!-- Cache-bust both scripts so Alt1 can't keep an old version forever -->
+  <div style="margin-top:10px;"><b>Debug</b></div>
+  <pre id="debugBox"></pre>
+
+  <!-- Cache-bust scripts so Alt1 can't stick on old versions -->
   <script>
-    // Change APP_VERSION when you publish a new release
-    window.APP_VERSION = "0.3.6";
-    // BUILD_ID changes each reload of this HTML file
+    window.APP_VERSION = "0.3.7";
     window.BUILD_ID = "build-" + Date.now();
 
     document.getElementById("appVersion").textContent = window.APP_VERSION;
