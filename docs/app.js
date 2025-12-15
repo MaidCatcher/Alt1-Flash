@@ -408,6 +408,26 @@ function stage2FindXCornerNear(seedAbsX, seedAbsY){
 
   return { absX, absY, score: m.score };
 }
+function drawFullRsBoundsPreview() {
+  const rsW = alt1.rsWidth || 0;
+  const rsH = alt1.rsHeight || 0;
+
+  const cap = captureRegion(0, 0, rsW, rsH);
+  if (!cap) {
+    setStatus("Capture failed");
+    dbg("captureRegion full RS returned null\n" + JSON.stringify(window.progflashCaptureDiag || {}, null, 2));
+    return;
+  }
+  drawRegionPreview(cap, `FULL RS (${rsW}x${rsH})`, null, null);
+  dbg(JSON.stringify({
+    rsWidth: rsW,
+    rsHeight: rsH,
+    rsX: alt1.rsX,
+    rsY: alt1.rsY,
+    maxtransfer: alt1.maxtransfer
+  }, null, 2));
+}
+
 
 function runAutoFindOnce(){
   if (!running) return;
@@ -498,6 +518,8 @@ testBtn.onclick = () => alert("flash test");
 startBtn.onclick = () => start().catch(console.error);
 stopBtn.onclick = () => stop();
 autoFindBtn.onclick = () => {
+  drawFullRsBoundsPreview();
+
   if (!running) start().catch(console.error);
   else { clearLocked(); runAutoFindOnce(); }
 };
