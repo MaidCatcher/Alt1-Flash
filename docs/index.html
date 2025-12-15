@@ -1,28 +1,83 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
 <head>
-  <meta charset="utf-8">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>ProgFlash</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 12px; }
+    .row { margin-bottom: 10px; }
+    button { margin-right: 6px; }
+    #debugBox {
+      white-space: pre;
+      border: 1px solid #ccc;
+      padding: 8px;
+      height: 420px;
+      overflow: auto;
+      background: #fff;
+    }
+    #versionBar {
+      font-size: 12px;
+      opacity: 0.85;
+      margin-top: 6px;
+    }
+    #versionBar code { font-family: Consolas, monospace; }
+  </style>
 </head>
+
 <body>
   <h2>ProgFlash</h2>
 
-  <div>
+  <div class="row">
     <button id="startBtn">Start</button>
     <button id="stopBtn">Stop</button>
     <button id="testFlashBtn">Test flash</button>
+
+    <div id="versionBar">
+      Version: <code id="appVersion">unknown</code> |
+      Build: <code id="appBuild">unknown</code> |
+      Loaded: <code id="loadedAt">unknown</code>
+    </div>
   </div>
 
-  <pre>
-Status: <span id="status">Idle</span>
-Mode: <span id="mode">Not running</span>
-Lock: <span id="lock">none</span>
-Progress: <span id="progress">—</span>
-  </pre>
+  <div class="row">
+    <div>Status: <span id="status">Idle</span></div>
+    <div>Mode: <span id="mode">Not running</span></div>
+    <div>Lock: <span id="lock">none</span></div>
+    <div>Progress: <span id="progress">—</span></div>
+  </div>
 
-  <pre id="debugBox"></pre>
+  <div id="debugBox"></div>
 
-  <script src="matcher.js"></script>
-  <script src="app.js"></script>
+  <!-- Cache-bust both scripts so Alt1 can't keep an old version forever -->
+  <script>
+    // Change APP_VERSION when you publish a new release
+    window.APP_VERSION = "0.3.0";
+    // BUILD_ID changes each edit/reload in *this* HTML file
+    window.BUILD_ID = "build-" + Date.now();
+
+    document.getElementById("appVersion").textContent = window.APP_VERSION;
+    document.getElementById("appBuild").textContent = window.BUILD_ID;
+    document.getElementById("loadedAt").textContent = new Date().toLocaleString();
+
+    // Dynamically load scripts with cache busters
+    function loadScript(src) {
+      return new Promise((resolve, reject) => {
+        const s = document.createElement("script");
+        s.src = src + (src.includes("?") ? "&" : "?") + "v=" + encodeURIComponent(window.BUILD_ID);
+        s.onload = () => resolve();
+        s.onerror = () => reject(new Error("Failed to load: " + src));
+        document.head.appendChild(s);
+      });
+    }
+
+    // matcher first, then app
+    loadScript("matcher.js")
+      .then(() => loadScript("app.js"))
+      .catch(err => {
+        const dbg = document.getElementById("debugBox");
+        dbg.textContent = String(err && err.message ? err.message : err);
+      });
+  </script>
 </body>
 </html>
