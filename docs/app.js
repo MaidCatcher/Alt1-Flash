@@ -1,6 +1,5 @@
-// app.js — calibration-based WIDE scanning + TRACK, with version/build visible
+// app.js — calibration-based WIDE scanning + TRACK + best-score debug + full-scan fallback
 // Requires matcher.js exposing: captureRs, findAnchor, loadImage
-// Uses alt1.mousePosition for one-click calibration. :contentReference[oaicite:1]{index=1}
 
 const statusEl = document.getElementById("status");
 const modeEl   = document.getElementById("mode");
@@ -26,21 +25,21 @@ const BUILD_ID = window.BUILD_ID || "unknown";
 
 // ----------------- CONFIG -----------------
 
-// Default WIDE region if not calibrated (full viewport)
+// Default WIDE if not calibrated: "mostly full screen" but you can set to full viewport
 const DEFAULT_WIDE = {
   x: 0,
   y: 0,
-  w: null, // null means "use full img width"
-  h: null  // null means "use full img height"
+  w: null, // null => full width
+  h: null  // null => full height
 };
 
-// How big the calibrated WIDE box should be (centered on the mouse when calibrating)
+// Calibrate box size (centered on mouse)
 const CALIB = {
   boxW: 1200,
   boxH: 520
 };
 
-// After lock, track near last position (small box => low lag)
+// Tracking window after lock
 const TRACK = {
   padX: 220,
   padY: 140,
@@ -48,18 +47,26 @@ const TRACK = {
   minH: 220
 };
 
-// Matcher thresholds
+// Matcher thresholds (start forgiving, then tighten later)
 const MATCH = {
-  tolerance: 65,
-  minScoreWide: 0.70,
-  minScoreTrack: 0.78
+  tolerance: 75,        // a bit more forgiving
+  minScoreWide: 0.62,   // easier to get first lock
+  minScoreTrack: 0.72   // tighter once tracking
 };
 
-// Overlays (throttled to avoid focus weirdness)
+// Full-screen fallback reacquire (handles users moving UI without calibrating)
+const REACQUIRE = {
+  enableFullScanFallback: true,
+  // If we fail to lock for this many ticks, start doing periodic full scans
+  startAfterMissTicks: 8,     // 8 ticks * 200ms = 1.6s
+  fullScanEveryTicks: 5       // run full scan 1 out of every 5 ticks after that
+};
+
+// Overlays (keep WIDE overlay off by default for stability)
 const OVERLAY = {
   enabled: true,
   thickness: 2,
-  showWide: false,  // keep false by default (stable + no minimising)
+  showWide: false,
   showTrack: true,
   showFound: true
 };
@@ -73,7 +80,10 @@ let anchor = null;
 let locked = false;
 let lastLock = { x: 0, y: 0, score: 0 };
 
-// persisted calibrated wide box (in capture coords)
+let missTicks = 0;
+let tickCount = 0;
+
+// persisted calibration
 const LS_KEY = "progflash.calibWide";
 let calibratedWide = loadCalibWide();
 
@@ -86,41 +96,32 @@ function loadCalibWide(){
     if (!obj || typeof obj.x !== "number" || typeof obj.y !== "number" ||
         typeof obj.w !== "number" || typeof obj.h !== "number") return null;
     return obj;
-  } catch (_) {
-    return null;
-  }
+  } catch (_) { return null; }
 }
 
 function saveCalibWide(obj){
-  try {
-    localStorage.setItem(LS_KEY, JSON.stringify(obj));
-  } catch (_) {}
+  try { localStorage.setItem(LS_KEY, JSON.stringify(obj)); } catch (_) {}
 }
 
 function updateCalibLabel(){
   if (!calibWideEl) return;
-  if (!calibratedWide) {
-    calibWideEl.textContent = "none";
-    return;
-  }
-  calibWideEl.textContent = `x=${calibratedWide.x},y=${calibratedWide.y},w=${calibratedWide.w},h=${calibratedWide.h}`;
+  calibWideEl.textContent = calibratedWide
+    ? `x=${calibratedWide.x},y=${calibratedWide.y},w=${calibratedWide.w},h=${calibratedWide.h}`
+    : "none";
 }
 
-// ---------- Image helpers ----------
+// ---------- Helpers ----------
 function cropView(img, ox, oy, w, h){
   const x0 = Math.max(0, Math.min(img.width  - 1, ox));
   const y0 = Math.max(0, Math.min(img.height - 1, oy));
   const cw = Math.max(1, Math.min(w, img.width  - x0));
   const ch = Math.max(1, Math.min(h, img.height - y0));
-
   return {
     width: cw,
     height: ch,
     _offsetX: x0,
     _offsetY: y0,
-    getPixel(x, y){
-      return img.getPixel(x0 + x, y0 + y);
-    }
+    getPixel(x, y){ return img.getPixel(x0 + x, y0 + y); }
   };
 }
 
@@ -132,18 +133,18 @@ function clampRegionToImg(img, region){
   return { x, y, w, h };
 }
 
-function getWideRegion(img){
-  // Use calibrated region if available
-  if (calibratedWide) {
-    const r = clampRegionToImg(img, calibratedWide);
-    return { ...r, mode: "WIDE(CALIB)" };
-  }
-
-  // Default full viewport
+function getDefaultWide(img){
   const w = DEFAULT_WIDE.w == null ? img.width : DEFAULT_WIDE.w;
   const h = DEFAULT_WIDE.h == null ? img.height : DEFAULT_WIDE.h;
-  const r = clampRegionToImg(img, { x: DEFAULT_WIDE.x, y: DEFAULT_WIDE.y, w, h });
-  return { ...r, mode: "WIDE(DEFAULT)" };
+  return { ...clampRegionToImg(img, { x: DEFAULT_WIDE.x, y: DEFAULT_WIDE.y, w, h }), mode: "WIDE(DEFAULT)" };
+}
+
+function getCalibWide(img){
+  return { ...clampRegionToImg(img, calibratedWide), mode: "WIDE(CALIB)" };
+}
+
+function getFullWide(img){
+  return { x: 0, y: 0, w: img.width, h: img.height, mode: "WIDE(FULL)" };
 }
 
 function getTrackRegion(img){
@@ -159,21 +160,16 @@ function getTrackRegion(img){
   let w = Math.min(desiredW, img.width  - x);
   let h = Math.min(desiredH, img.height - y);
 
-  w = Math.max(1, w);
-  h = Math.max(1, h);
-
-  return { x, y, w, h, mode: "TRACK" };
+  return { x, y, w: Math.max(1, w), h: Math.max(1, h), mode: "TRACK" };
 }
 
-// ---------- Overlay helpers ----------
+// ---------- Overlay ----------
 let lastOverlayDraw = 0;
-
 function overlayRect(color, x, y, w, h, label){
   if (!OVERLAY.enabled) return;
   if (!window.alt1) return;
   if (!alt1.permissionOverlay) return;
 
-  // throttle overlays
   const now = Date.now();
   if (now - lastOverlayDraw < 250) return;
   lastOverlayDraw = now;
@@ -183,11 +179,11 @@ function overlayRect(color, x, y, w, h, label){
 
   try {
     if (typeof alt1.overLayRect === "function") {
-      // overLayRect(color, x, y, w, h, time, lineWidth) :contentReference[oaicite:2]{index=2}
+      // overLayRect(color, x, y, w, h, time, lineWidth)
       alt1.overLayRect(color, sx, sy, w, h, 700, OVERLAY.thickness);
     }
     if (label && typeof alt1.overLayText === "function") {
-      // overLayText(str, color, size, x, y, time) :contentReference[oaicite:3]{index=3}
+      // overLayText(str, color, size, x, y, time)
       alt1.overLayText(label, color, 14, sx + 6, sy + 6, 700);
     }
   } catch (_) {}
@@ -196,8 +192,7 @@ function overlayRect(color, x, y, w, h, label){
 function drawScanOverlay(region){
   if (region.mode.startsWith("WIDE") && !OVERLAY.showWide) return;
   if (region.mode === "TRACK" && !OVERLAY.showTrack) return;
-
-  const color = (region.mode === "TRACK") ? 0xA0FFAA00 : 0xA000FF00;
+  const color = region.mode === "TRACK" ? 0xA0FFAA00 : 0xA000FF00;
   overlayRect(color, region.x, region.y, region.w, region.h, region.mode);
 }
 
@@ -208,27 +203,32 @@ function drawFoundOverlay(foundX, foundY){
 }
 
 // ---------- Matching ----------
-function runMatch(img, region, minScore){
+// IMPORTANT: we call findAnchor with a VERY LOW minScore so it returns the best score,
+// then we decide if it's good enough. This makes debugging possible.
+function runMatchWithBestScore(img, region, acceptScore){
   const hay = cropView(img, region.x, region.y, region.w, region.h);
+
   const res = findAnchor(hay, anchor, {
     tolerance: MATCH.tolerance,
-    minScore
+    minScore: 0.01
   });
 
-  if (res && res.ok) {
+  const bestScore = res && typeof res.score === "number" ? res.score : 0;
+
+  if (res && res.ok && bestScore >= acceptScore) {
     return {
       ok: true,
       x: res.x + hay._offsetX,
       y: res.y + hay._offsetY,
-      score: res.score
+      score: bestScore
     };
   }
-  return { ok: false, score: res && typeof res.score === "number" ? res.score : null };
+
+  return { ok: false, score: bestScore };
 }
 
 // ---------- Calibration ----------
 function unpackMousePosition(packed){
-  // packed: x=r>>16, y=r&0xFFFF :contentReference[oaicite:4]{index=4}
   const x = (packed >>> 16) & 0xFFFF;
   const y = packed & 0xFFFF;
   return { x, y };
@@ -240,36 +240,34 @@ function calibrateNow(){
     return;
   }
 
-  // mousePosition is a packed int. It’s only valid when mouse is inside RS client. :contentReference[oaicite:5]{index=5}
   const packed = alt1.mousePosition;
   if (typeof packed !== "number") {
     setStatus("Calibrate failed");
-    dbg("alt1.mousePosition not available. This may require the relevant permission (gamestate) in Alt1.\n\n" +
-        JSON.stringify({ app: { version: APP_VERSION, build: BUILD_ID }, mousePositionType: typeof packed }, null, 2));
+    dbg(JSON.stringify({
+      app: { version: APP_VERSION, build: BUILD_ID },
+      error: "alt1.mousePosition not available",
+      mousePositionType: typeof packed
+    }, null, 2));
     return;
   }
 
   const mp = unpackMousePosition(packed);
-
-  // If mouse is outside RS, mp may come through as 0,0 depending on setup.
-  // We’ll guard against obvious bad values.
   if ((mp.x === 0 && mp.y === 0) || mp.x < 0 || mp.y < 0) {
     setStatus("Calibrate failed");
-    dbg("Mouse position invalid. Hover your mouse over the progress bar INSIDE the RuneScape client, then click Calibrate.\n\n" +
-        JSON.stringify({ packed, mp }, null, 2));
+    dbg(JSON.stringify({
+      app: { version: APP_VERSION, build: BUILD_ID },
+      error: "mouse position invalid (hover over RS window then click calibrate)",
+      packed,
+      mp
+    }, null, 2));
     return;
   }
 
-  // Build calibrated WIDE box centered on mouse
   const halfW = Math.floor(CALIB.boxW / 2);
   const halfH = Math.floor(CALIB.boxH / 2);
 
-  let x = Math.floor(mp.x - halfW);
-  let y = Math.floor(mp.y - halfH);
-
-  // Clamp to positive — further clamping to viewport happens at runtime (when we have capture dims)
-  x = Math.max(0, x);
-  y = Math.max(0, y);
+  let x = Math.max(0, Math.floor(mp.x - halfW));
+  let y = Math.max(0, Math.floor(mp.y - halfH));
 
   calibratedWide = { x, y, w: CALIB.boxW, h: CALIB.boxH };
   saveCalibWide(calibratedWide);
@@ -278,13 +276,12 @@ function calibrateNow(){
   setStatus("Calibrated");
   dbg(JSON.stringify({
     app: { version: APP_VERSION, build: BUILD_ID },
-    note: "Calibrated WIDE region saved. Start scanning now.",
     mouse: { packed, x: mp.x, y: mp.y },
     calibratedWide
   }, null, 2));
 }
 
-// ---------- App lifecycle ----------
+// ---------- App ----------
 async function start(){
   if (!window.alt1){
     setStatus("Alt1 missing");
@@ -296,7 +293,7 @@ async function start(){
       typeof window.findAnchor !== "function" ||
       typeof window.loadImage !== "function") {
     setStatus("matcher.js not loaded");
-    dbg("Missing globals:\n" + JSON.stringify({
+    dbg(JSON.stringify({
       captureRs: typeof window.captureRs,
       findAnchor: typeof window.findAnchor,
       loadImage: typeof window.loadImage
@@ -317,6 +314,8 @@ async function start(){
   running = true;
   locked = false;
   lastLock = { x: 0, y: 0, score: 0 };
+  missTicks = 0;
+  tickCount = 0;
 
   setMode("Running");
   setStatus("Searching…");
@@ -338,8 +337,21 @@ function stop(){
   setProgress("—");
 }
 
+function pickWideRegion(img){
+  // Prefer calibrated if exists
+  if (calibratedWide) return getCalibWide(img);
+  return getDefaultWide(img);
+}
+
+function shouldDoFullScanFallback(){
+  if (!REACQUIRE.enableFullScanFallback) return false;
+  if (missTicks < REACQUIRE.startAfterMissTicks) return false;
+  return (tickCount % REACQUIRE.fullScanEveryTicks) === 0;
+}
+
 function tick(){
   if (!running) return;
+  tickCount++;
 
   const img = captureRs();
   if (!img){
@@ -354,31 +366,41 @@ function tick(){
   if (locked) {
     region = getTrackRegion(img);
     drawScanOverlay(region);
-
-    result = runMatch(img, region, MATCH.minScoreTrack);
+    result = runMatchWithBestScore(img, region, MATCH.minScoreTrack);
 
     if (!result.ok) {
-      // Reacquire in WIDE (calibrated or default)
-      const wide = getWideRegion(img);
-      drawScanOverlay(wide);
-      const reacq = runMatch(img, wide, MATCH.minScoreWide);
+      missTicks++;
+      // reacquire from calibrated/default wide
+      const wide = pickWideRegion(img);
+      result = runMatchWithBestScore(img, wide, MATCH.minScoreWide);
+      region = wide;
 
-      if (reacq.ok) {
-        result = reacq;
-        region = wide;
-      } else {
+      if (!result.ok) {
+        // lost lock
         locked = false;
       }
+    } else {
+      missTicks = 0;
     }
   } else {
-    region = getWideRegion(img);
+    missTicks++;
+
+    // mostly use calibrated/default wide
+    region = pickWideRegion(img);
+
+    // periodic full scan fallback if we keep missing (handles moved bars)
+    if (shouldDoFullScanFallback()) {
+      region = getFullWide(img);
+    }
+
     drawScanOverlay(region);
-    result = runMatch(img, region, MATCH.minScoreWide);
+    result = runMatchWithBestScore(img, region, MATCH.minScoreWide);
   }
 
   if (result.ok){
     locked = true;
     lastLock = { x: result.x, y: result.y, score: result.score };
+    missTicks = 0;
 
     setStatus("Locked");
     setLock(`x=${result.x}, y=${result.y}`);
@@ -389,6 +411,7 @@ function tick(){
     dbg(JSON.stringify({
       app: { version: APP_VERSION, build: BUILD_ID },
       scanMode: region.mode,
+      missTicks,
       capture: { w: img.width, h: img.height },
       calibratedWide,
       scanRegion: { x: region.x, y: region.y, w: region.w, h: region.h },
@@ -403,11 +426,12 @@ function tick(){
     dbg(JSON.stringify({
       app: { version: APP_VERSION, build: BUILD_ID },
       scanMode: region.mode,
+      missTicks,
       capture: { w: img.width, h: img.height },
       calibratedWide,
       scanRegion: { x: region.x, y: region.y, w: region.w, h: region.h },
       anchor: { w: anchor.width, h: anchor.height },
-      res: result
+      res: { ok: false, bestScore: result.score }
     }, null, 2));
   }
 }
