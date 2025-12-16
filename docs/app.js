@@ -36,7 +36,7 @@
   const canvas = $("previewCanvas");
   const ctx = canvas ? canvas.getContext("2d", { willReadFrequently: true }) : null;
 
-  const APP_VERSION = "0.6.18";
+  const APP_VERSION = "0.6.19";
   const BUILD_ID = "final-" + Date.now();
 
   function setStatus(v) { if (statusEl) statusEl.textContent = v; }
@@ -52,6 +52,7 @@
   const LS_LOCK = "progflash.lockPos";              // {x,y}
   const LS_MULTI = "progflash.multiAnchorABC";      // anchors + offsets
   const LS_SCANAREA = "progflash.scanArea";         // "top|middle|bottom|full"
+  const LS_DIALOG = "progflash.dialogRect";         // {x,y,w,h} dialog bounds
 
   function save(key, obj) { localStorage.setItem(key, JSON.stringify(obj)); }
   function load(key) { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } }
@@ -91,6 +92,15 @@
     } catch {
       return false;
     }
+  }
+
+  function saveDialogRect(r) {
+    if (!r) return;
+    save(LS_DIALOG, { x: (r.x|0), y: (r.y|0), w: (r.w|0), h: (r.h|0) });
+  }
+  function loadDialogRect() {
+    const r = load(LS_DIALOG);
+    return r && typeof r.x==="number" ? r : null;
   }
 }
 
@@ -515,6 +525,7 @@
 
           // Screen overlay: draw the confirmed dialog on the RS client
           overlayRectOnScreen(c.absRect.x, c.absRect.y, c.absRect.w, c.absRect.h, 1200);
+          saveDialogRect(c.absRect);
 
 
     // Screen overlay: draw dialog rectangle if we know dialog geometry
@@ -522,6 +533,7 @@
       const dialogX = ax - (s.Ax || 0);
       const dialogY = ay - (s.Ay || 0);
       overlayRectOnScreen(dialogX, dialogY, s.dialogW, s.dialogH, 1200);
+      saveDialogRect({x:dialogX,y:dialogY,w:s.dialogW,h:s.dialogH});
     }
 
 
@@ -546,6 +558,41 @@
       // If scanning is active, scanTick() handles preview.
       // Otherwise, show a small "alive" capture to avoid black preview.
       if (!running || scanActive) return;
+
+      // If locked, update progress by sampling the dialog rect
+      const drect = loadDialogRect();
+      if (drect) {
+        const img = captureRegion(drect.x, drect.y, drect.w, drect.h);
+        if (img) {
+          const pb = scoreProgressBar(img);
+          const pct = clamp(pb.xEdge / Math.max(1, (img.width - 1)), 0, 1);
+          // Update UI
+          const pctTxt = Math.round(pct * 100) + "%";
+          setProgress(pctTxt);
+
+          // Flash on completion or big jump
+          const last = window._pf_lastPct ?? null;
+          window._pf_lastPct = pct;
+
+          if (pct >= 0.985) {
+            overlayRectOnScreen(drect.x, drect.y, drect.w, drect.h, 900);
+          } else if (last !== null && Math.abs(pct - last) >= 0.12) {
+            overlayRectOnScreen(drect.x, drect.y, drect.w, drect.h, 450);
+          }
+
+          // Preview with A/B/C overlay if available
+          const s = load(LS_MULTI);
+          const overlays = [];
+          if (s && typeof s.Ax === "number") {
+            overlays.push({ x: s.Ax, y: s.Ay, w: s.A.w, h: s.A.h, color: "#00ffff", label: "A" });
+            overlays.push({ x: s.Ax + s.dxB, y: s.Ay + s.dyB, w: s.B.w, h: s.B.h, color: "#00ff00", label: "B" });
+            overlays.push({ x: s.Ax + s.dxC, y: s.Ay + s.dyC, w: s.C.w, h: s.C.h, color: "#ff9900", label: "C" });
+          }
+          drawImageScaled(img, `LOCKED pb=${pb.score.toFixed(2)} pct=${pctTxt}`, overlays);
+          return;
+        }
+      }
+
 
       const rs = getRsSize();
       if (!rs.w || !rs.h) return;
@@ -738,6 +785,8 @@
     if (!running) start();
     // always clear lock for a fresh learn
     del(LS_LOCK);
+    del(LS_DIALOG);
+    window._pf_lastPct = null;
     updateSavedLockLabel();
     startAutoFindInternal();
   }
@@ -745,6 +794,8 @@
   function clearLock() {
     del(LS_LOCK);
     del(LS_MULTI);
+    del(LS_DIALOG);
+    window._pf_lastPct = null;
     updateSavedLockLabel();
     setLock("none");
     setStatus("Cleared");
@@ -767,7 +818,10 @@
   if (autoFindBtn) autoFindBtn.onclick = autoFind;
   if (clearLockBtn) clearLockBtn.onclick = clearLock;
   if (testFlashBtn) testFlashBtn.onclick = () => {
-    alert("flash test");
+    const d=loadDialogRect();
+    if(d){ overlayRectOnScreen(d.x,d.y,d.w,d.h,900); return; }
+    const rs=getRsSize();
+    overlayRectOnScreen(Math.floor(rs.w*0.25), Math.floor(rs.h*0.25), Math.floor(rs.w*0.5), Math.floor(rs.h*0.15), 900);
   };
 
   dbg({
