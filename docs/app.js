@@ -36,7 +36,7 @@
   const canvas = $("previewCanvas");
   const ctx = canvas ? canvas.getContext("2d", { willReadFrequently: true }) : null;
 
-  const APP_VERSION = "0.6.16";
+  const APP_VERSION = "0.6.17";
   const BUILD_ID = "final-" + Date.now();
 
   function setStatus(v) { if (statusEl) statusEl.textContent = v; }
@@ -65,7 +65,34 @@
 
   // ---------------- Utils ----------------
   function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
-  function rgba(r, g, b, a) { return (r & 255) | ((g & 255) << 8) | ((b & 255) << 16) | ((a & 255) << 24); }
+  function rgba(r, g, b, a) { return (r & 255) | ((g & 255) << 8) | ((b & 255) << 16) | ((a & 255) << 24); 
+  // ---------------- Screen overlay (Alt1) ----------------
+  // Draws a green rectangle on the RuneScape client (not just the preview).
+  // Uses whichever overlay API is available.
+  function overlayRectOnScreen(x, y, w, h, ms = 1200) {
+    try {
+      if (!window.alt1) return false;
+      // Some Alt1 builds expose different names; try a few safely.
+      const colorNum = 0x00ff00; // green
+      if (typeof alt1.overLayRect === "function") {
+        // Common signature: (x,y,w,h,color,thickness,ms)
+        alt1.overLayRect(x, y, w, h, colorNum, 2, ms);
+        return true;
+      }
+      if (typeof alt1.overLayRectEx === "function") {
+        alt1.overLayRectEx(x, y, w, h, colorNum, 2, ms);
+        return true;
+      }
+      if (typeof alt1.overlayRect === "function") {
+        alt1.overlayRect(x, y, w, h, colorNum, 2, ms);
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+}
 
   function bytesToB64(bytes) {
     let s = "";
@@ -430,7 +457,9 @@
       B: { w: Bw, h: Bh, b64: bytesToB64(bytesB) },
       C: { w: Cw, h: Ch, b64: bytesToB64(bytesC) },
       dxB: (Bx - Ax), dyB: (By - Ay),
-      dxC: (Cx - Ax), dyC: (Cy - Ay)
+      dxC: (Cx - Ax), dyC: (Cy - Ay),
+      dialogW: img.width, dialogH: img.height,
+      Ax: Ax, Ay: Ay
     });
 
     dbg({ learnedAnchors: true });
@@ -483,6 +512,18 @@
     setLock(`x=${ax}, y=${ay}`);
     setStatus("Locked (fast A+B+C)");
     setProgress("locked");
+
+          // Screen overlay: draw the confirmed dialog on the RS client
+          overlayRectOnScreen(c.absRect.x, c.absRect.y, c.absRect.w, c.absRect.h, 1200);
+
+
+    // Screen overlay: draw dialog rectangle if we know dialog geometry
+    if (s.dialogW && s.dialogH) {
+      const dialogX = ax - (s.Ax || 0);
+      const dialogY = ay - (s.Ay || 0);
+      overlayRectOnScreen(dialogX, dialogY, s.dialogW, s.dialogH, 1200);
+    }
+
 
     // Live overlay boxes in preview (draw in RS coords onto a full-screen downscaled preview)
     // We'll draw a lightweight preview of the search region and overlays.
