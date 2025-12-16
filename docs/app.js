@@ -1,7 +1,9 @@
-// ProgFlash app_d.js
+// ProgFlash app_e.js
 // Improvements:
 // - Top/center bounded scan (top 62%, center 70% width)
 // - Candidate shortlist per pass (top N) then sequential 2-frame confirm
+// - Early-exit during scan when a very strong candidate is found
+// - Scan area presets (Top/Middle/Bottom/Full) via #scanPreset + localStorage
 // - Slightly looser single-frame checks, stronger 2-frame confirm
 // - Anchor learned from stable top-right frame patch near Close X (avoids moving bar/text)
 //
@@ -24,6 +26,8 @@
   const dbgEl = $("debugBox");
   const savedLockEl = $("savedLock");
 
+  const scanPresetEl = $("scanPreset");
+
   const startBtn = $("startBtn");
   const stopBtn = $("stopBtn");
   const autoFindBtn = $("autoFindBtn");
@@ -39,12 +43,13 @@
   function setProgress(v) { if (progEl) progEl.textContent = v; }
   function dbg(v) { if (dbgEl) dbgEl.textContent = String(v); }
 
-  const APP_VERSION = window.APP_VERSION || "0.6.6-d";
+  const APP_VERSION = window.APP_VERSION || "0.6.7-e";
   const BUILD_ID = window.BUILD_ID || ("build-" + Date.now());
 
   // ---------- Storage ----------
   const LS_LOCK_POS = "progflash.lockPos";       // {x,y}
   const LS_ANCHOR = "progflash.learnedAnchor";   // {w,h,rgbaBase64}
+  const LS_SCAN_PRESET = "progflash.scanPreset"; // "top" | "mid" | "bot" | "full"
 
   function loadJSON(key) { try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : null; } catch { return null; } }
   function saveJSON(key, obj) { try { localStorage.setItem(key, JSON.stringify(obj)); } catch {} }
@@ -197,13 +202,42 @@
   const SCAN = {
     tileW: 640,
     tileH: 360,
-    // bounded search: top 62%, center 70%
+    // default bounds (Top preset)
+    yStartFrac: 0.00,
     yMaxFrac: 0.62,
     xMinFrac: 0.15,
     xMaxFrac: 0.85,
     // shortlist per pass
-    shortlistN: 6
+    shortlistN: 6,
+    // Early-exit: once best combined score passes this threshold,
+    // stop scanning more tiles and start confirming immediately.
+    earlyExitComb: 0.92
   };
+
+  function getScanPreset() {
+    // Priority: UI select -> localStorage -> default
+    const ui = scanPresetEl && scanPresetEl.value ? String(scanPresetEl.value) : null;
+    const saved = (() => { try { return localStorage.getItem(LS_SCAN_PRESET); } catch { return null; } })();
+    return (ui || saved || "top").toLowerCase();
+  }
+
+  function applyScanPreset(preset, rs) {
+    // 4 options: top, mid, bot, full
+    // NOTE: Keep a center bias for the three positional presets.
+    switch (preset) {
+      case "mid":
+      case "middle":
+        return { yStartFrac: 0.18, yMaxFrac: 0.82, xMinFrac: 0.12, xMaxFrac: 0.88 };
+      case "bot":
+      case "bottom":
+        return { yStartFrac: 0.38, yMaxFrac: 1.00, xMinFrac: 0.12, xMaxFrac: 0.88 };
+      case "full":
+        return { yStartFrac: 0.00, yMaxFrac: 1.00, xMinFrac: 0.00, xMaxFrac: 1.00 };
+      case "top":
+      default:
+        return { yStartFrac: 0.00, yMaxFrac: 0.62, xMinFrac: 0.15, xMaxFrac: 0.85 };
+    }
+  }
 
   const RECT = {
     ds: 4,
@@ -549,17 +583,32 @@
     const rs = getRsSize();
     if (!rs.w || !rs.h) return false;
 
-    const yMax = Math.floor(rs.h * SCAN.yMaxFrac);
-    const xMin = Math.floor(rs.w * SCAN.xMinFrac);
-    const xMax = Math.floor(rs.w * SCAN.xMaxFrac);
+    const preset = getScanPreset();
+    const bounds = applyScanPreset(preset, rs);
+
+    const yStart = Math.floor(rs.h * bounds.yStartFrac);
+    const yMax = Math.floor(rs.h * bounds.yMaxFrac);
+    const xMin = Math.floor(rs.w * bounds.xMinFrac);
+    const xMax = Math.floor(rs.w * bounds.xMaxFrac);
+
+    // Clamp
+    const yStartC = clamp(yStart, 0, rs.h - 1);
+    const yMaxC = clamp(yMax, yStartC + 1, rs.h);
+    const xMinC = clamp(xMin, 0, rs.w - 1);
+    const xMaxC = clamp(xMax, xMinC + 1, rs.w);
 
     scan = {
       rs,
-      xMin, xMax, yMax,
-      tx: xMin,
-      ty: 0,
+      preset,
+      xMin: xMinC,
+      xMax: xMaxC,
+      yStart: yStartC,
+      yMax: yMaxC,
+      tx: xMinC,
+      ty: yStartC,
       tileIndex: 0,
-      cands: []
+      cands: [],
+      earlyExit: false
     };
     return true;
   }
@@ -567,9 +616,7 @@
   function scanStepOneTile() {
     const rs = scan.rs;
 
-    if (scan.ty >= scan.yMax) {
-      return { done: true };
-    }
+    if (scan.ty >= scan.yMax) return { done: true, early: !!scan.earlyExit };
 
     if (scan.tx >= scan.xMax) {
       scan.tx = scan.xMin;
@@ -607,6 +654,13 @@
     scan.cands.sort((a, b) => b.comb - a.comb);
     if (scan.cands.length > 20) scan.cands.length = 20;
 
+    // Early exit: if we already have a very strong candidate, stop scanning more tiles.
+    const bestNow = scan.cands[0];
+    if (bestNow && bestNow.comb >= SCAN.earlyExitComb) {
+      scan.ty = scan.yMax; // forces done on next tick
+      scan.earlyExit = { tile: scan.tileIndex, comb: bestNow.comb };
+    }
+
     // Preview best candidate so far
     const best = scan.cands[0];
     if (best) {
@@ -624,6 +678,13 @@
     }
 
     setProgress(`tile ${scan.tileIndex}`);
+
+    // If early-exit was set above, finish immediately; the caller will start confirming.
+    if (scan.earlyExit) {
+      setStatus(`Early exit: strong candidate comb=${bestNow.comb.toFixed(3)} (preset ${scan.preset})`);
+      return { done: true, early: true };
+    }
+
     return { done: false };
   }
 
@@ -877,8 +938,10 @@
     app: { version: APP_VERSION, build: BUILD_ID },
     savedLock: loadJSON(LS_LOCK_POS),
     hasAnchor: !!loadJSON(LS_ANCHOR),
-    scanBounds: "top 62%, center 70% width",
+    scanPreset: (() => { try { return localStorage.getItem(LS_SCAN_PRESET) || "top"; } catch { return "top"; } })(),
+    scanPresets: { top: "top 62% + center 70%", mid: "middle", bot: "bottom", full: "full screen" },
+    earlyExitComb: SCAN.earlyExitComb,
     shortlist: SCAN.shortlistN,
-    note: "app_d: bounded scan + shortlist + stronger 2-frame confirm; anchor from stable top-right frame patch."
+    note: "app_e: scan presets + early-exit + shortlist + stronger 2-frame confirm; anchor from stable top-right frame patch."
   }, null, 2));
 })();

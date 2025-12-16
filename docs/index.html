@@ -26,6 +26,16 @@
     <button id="clearLockBtn">Clear lock</button>
     <button id="testFlashBtn">Test flash</button>
 
+    <label style="margin-left:10px; font-size:12px;">
+      Scan area:
+      <select id="scanPreset">
+        <option value="top">Top (recommended)</option>
+        <option value="mid">Middle</option>
+        <option value="bot">Bottom</option>
+        <option value="full">Full screen</option>
+      </select>
+    </label>
+
     <div id="versionBar">
       Version: <code id="appVersion">unknown</code> |
       Build: <code id="appBuild">unknown</code> |
@@ -51,7 +61,7 @@ Progress: <span id="progress">—</span>
 
   <script>
     // Cache buster build id
-    window.APP_VERSION = "0.6.6";
+    window.APP_VERSION = "0.6.7";
     window.BUILD_ID = "build-" + Date.now();
 
     document.getElementById("appVersion").textContent = window.APP_VERSION;
@@ -67,6 +77,18 @@ Progress: <span id="progress">—</span>
         document.head.appendChild(s);
       });
     }
+
+    // Persist scan preset UI (app.js also reads localStorage)
+    (function initScanPreset() {
+      const el = document.getElementById("scanPreset");
+      if (!el) return;
+      const key = "progflash.scanPreset";
+      const saved = localStorage.getItem(key);
+      if (saved) el.value = saved;
+      el.addEventListener("change", () => {
+        try { localStorage.setItem(key, el.value); } catch {}
+      });
+    })();
 
     loadScript("matcher.js")
       .then(() => loadScript("app.js"))
