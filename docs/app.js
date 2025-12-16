@@ -1,11 +1,10 @@
-// ProgFlash app_e.js
-// Improvements:
-// - Top/center bounded scan (top 62%, center 70% width)
-// - Candidate shortlist per pass (top N) then sequential 2-frame confirm
-// - Early-exit during scan when a very strong candidate is found
-// - Scan area presets (Top/Middle/Bottom/Full) via #scanPreset + localStorage
-// - Slightly looser single-frame checks, stronger 2-frame confirm
-// - Anchor learned from stable top-right frame patch near Close X (avoids moving bar/text)
+// ProgFlash app_f.js
+// Improvements over app_e:
+// - Coarse-to-fine scan: cheap coarse pass to collect candidates, then fine-pass refinement on top K.
+// - Preview throttling: update preview only every N tiles or when best candidate changes.
+// - Earlier confirm trigger: start 2-frame confirm once a "good enough" candidate is found, without scanning remaining tiles.
+// - Keeps scan area presets (Top/Middle/Bottom/Full) via #scanPreset + localStorage.
+// - Keeps Cancel + Close-X checks + progress bar signature, plus 2-frame confirm.
 //
 // Requires matcher.js to provide globals:
 //   captureRegion(x,y,w,h) -> {width,height,data:Uint8ClampedArray}
@@ -15,6 +14,7 @@
 //   status, mode, lock, progress, debugBox, savedLock
 //   startBtn, stopBtn, autoFindBtn, clearLockBtn, testFlashBtn
 //   previewCanvas
+//   scanPreset (select)  [optional but recommended]
 
 (() => {
   // ---------- DOM ----------
@@ -25,7 +25,6 @@
   const progEl = $("progress");
   const dbgEl = $("debugBox");
   const savedLockEl = $("savedLock");
-
   const scanPresetEl = $("scanPreset");
 
   const startBtn = $("startBtn");
@@ -43,7 +42,7 @@
   function setProgress(v) { if (progEl) progEl.textContent = v; }
   function dbg(v) { if (dbgEl) dbgEl.textContent = String(v); }
 
-  const APP_VERSION = window.APP_VERSION || "0.6.7-e";
+  const APP_VERSION = window.APP_VERSION || "0.6.8-f";
   const BUILD_ID = window.BUILD_ID || ("build-" + Date.now());
 
   // ---------- Storage ----------
@@ -103,7 +102,6 @@
 
     ctx.drawImage(tmp, 0, 0, srcW, srcH, offX, offY, drawW, drawH);
 
-    // label
     ctx.fillStyle = "rgba(0,0,0,0.6)";
     ctx.fillRect(6, 6, Math.min(cw - 12, 760), 20);
     ctx.fillStyle = "white";
@@ -198,34 +196,36 @@
     setStatus("Saved lock cleared");
   }
 
-  // ---------- Detection config ----------
+  // ---------- Scan config ----------
   const SCAN = {
     tileW: 640,
     tileH: 360,
-    // default bounds (Top preset)
-    yStartFrac: 0.00,
-    yMaxFrac: 0.62,
-    xMinFrac: 0.15,
-    xMaxFrac: 0.85,
+
     // shortlist per pass
     shortlistN: 4,
-    // Early-exit: once best combined score passes this threshold,
-    // stop scanning more tiles and start confirming immediately.
+
+    // Early exit (very strong)
     earlyExitComb: 0.92,
-    // Only update preview every N tiles unless a new best candidate appears
-    previewEvery: 8
+
+    // Earlier confirm trigger (good enough)
+    confirmNowComb: 0.80,          // if best >= this AND hasCancelOrClose
+    confirmNowComb2: 0.72,         // if top-2 both >= this, start confirm
+
+    // Preview throttling
+    previewEveryTiles: 8,          // update preview every N tiles
+    previewOnlyOnBestChange: true  // also update if best changes even if not on interval
+
+    // bounds are set via presets
   };
 
   function getScanPreset() {
-    // Priority: UI select -> localStorage -> default
     const ui = scanPresetEl && scanPresetEl.value ? String(scanPresetEl.value) : null;
     const saved = (() => { try { return localStorage.getItem(LS_SCAN_PRESET); } catch { return null; } })();
     return (ui || saved || "top").toLowerCase();
   }
 
-  function applyScanPreset(preset, rs) {
+  function applyScanPreset(preset) {
     // 4 options: top, mid, bot, full
-    // NOTE: Keep a center bias for the three positional presets.
     switch (preset) {
       case "mid":
       case "middle":
@@ -241,51 +241,44 @@
     }
   }
 
-  const RECT = {
+  // Coarse and fine configs
+  const RECT_COARSE = {
+    ds: 6,
+    edgeThr: 28,
+    scanStep: 6,
+    ring: 14,
+    sizes: [
+      { w: 450, h: 180 },
+      { w: 410, h: 165 },
+      { w: 370, h: 150 }
+    ],
+    minRectScore: 0.006,
+    // keep top windows by rectScore before running expensive feature checks
+    preselectK: 24,
+    tileKeep: 4
+  };
+
+  const RECT_FINE = {
     ds: 4,
     edgeThr: 26,
     scanStep: 3,
     ring: 14,
-    // Window-like sizes
     sizes: [
       { w: 470, h: 190 },
       { w: 450, h: 180 },
       { w: 430, h: 175 },
       { w: 410, h: 165 },
-      { w: 390
-
-
-const COARSE = {
-  ds: 6,
-  edgeThr: 26,
-  scanStep: 6,
-  ring: 16,
-  sizes: [
-    { w: 440, h: 165 },
-    { w: 400, h: 150 },
-    { w: 360, h: 140 }
-  ],
-  // how many edge-only rectangles to keep before fine evaluation
-  keep: 10
-};
-
-const FINE = {
-  ds: 4,
-  scanStep: 3,
-  // search padding around coarse rect (pixels)
-  padPx: 48
-};
-
-, h: 160 },
+      { w: 390, h: 160 },
       { w: 370, h: 150 },
       { w: 350, h: 140 }
     ],
-    minRectScore: 0.008
+    minRectScore: 0.008,
+    preselectK: 32,
+    tileKeep: 4
   };
 
   const PB = {
-    // progress-bar signature (single frame)
-    minScore: 0.16,     // looser than before
+    minScore: 0.16,
     minDiff: 18,
     minWidthFrac: 0.55,
     yBandTopFrac: 0.30,
@@ -295,7 +288,6 @@ const FINE = {
   };
 
   const CANCEL = {
-    // warm/orange button detector
     minWarmFrac: 0.10,
     minBandWFrac: 0.45,
     minBandH: 12,
@@ -304,7 +296,6 @@ const FINE = {
   };
 
   const CLOSEX = {
-    // edge-only "X" in top-right
     box: 26,
     inset: 6,
     minDiagHits: 10
@@ -313,7 +304,6 @@ const FINE = {
   const CONFIRM = {
     delayMs: 200,
     minBoundaryMovePx: 2,
-    // if movement low, accept only if pbScore is very strong AND cancel/close found in both frames
     pbStrong: 0.32
   };
 
@@ -399,21 +389,17 @@ const FINE = {
     let bestScore = 0;
     let bestBoundaryX = -1;
 
-    // Evaluate multiple rows; look for strongest left/right step.
     for (let y = yStart; y < yEnd; y += PB.rowStep) {
       const yy = clamp(y, 0, img.height - 1);
       const row = new Uint16Array(w);
 
-      // luminance samples
       for (let xx = 0; xx < w; xx += PB.xStep) {
         const sx = x0 + xx;
         if (sx < 0 || sx >= img.width) continue;
         const i = (yy * img.width + sx) * 4;
-        const g = toGray(img.data[i], img.data[i + 1], img.data[i + 2]);
-        row[xx] = g;
+        row[xx] = toGray(img.data[i], img.data[i + 1], img.data[i + 2]);
       }
 
-      // find best boundary by comparing left/right means
       const win = Math.max(minBandW, Math.floor(w * 0.65));
       const leftN = Math.max(8, Math.floor(win * 0.25));
       const rightN = leftN;
@@ -424,7 +410,6 @@ const FINE = {
         const r0 = clamp(bx + 1, 0, w - 1);
         const r1 = clamp(bx + rightN, 0, w - 1);
 
-        // compute means (sparse steps)
         let ls = 0, ln = 0;
         for (let x = l0; x <= l1; x += PB.xStep) { ls += row[x] || 0; ln++; }
         let rs = 0, rn = 0;
@@ -436,7 +421,6 @@ const FINE = {
 
         if (diff < PB.minDiff) continue;
 
-        // normalize by 255 and slight preference for boundaries away from edges
         const centerBias = 1.0 - Math.abs((bx / w) - 0.55) * 0.8;
         const sc = (diff / 255) * centerBias;
 
@@ -458,7 +442,6 @@ const FINE = {
     const bandH = Math.max(CANCEL.minBandH, Math.floor(h * 0.18));
     const bandW = Math.max(Math.floor(w * CANCEL.minBandWFrac), Math.floor(w * 0.40));
 
-    // Search a few horizontal bands near bottom; look for warm pixels dominance.
     let best = 0;
     for (let yy = yStart; yy < Math.min(yEnd, y0 + h - bandH); yy += 3) {
       const y1 = yy + bandH;
@@ -475,7 +458,6 @@ const FINE = {
             if (sx < 0 || sx >= img.width) continue;
             const i = (sy * img.width + sx) * 4;
             const r = img.data[i], g = img.data[i + 1], b = img.data[i + 2];
-            // "warm/orange" heuristic: red high, green mid, blue low
             if (r > 120 && g > 60 && b < 90 && (r - b) > 60) warm++;
             total++;
           }
@@ -537,11 +519,8 @@ const FINE = {
   }
 
   // ---------- Candidate evaluation ----------
-  function evaluateRectCandidate(img, iiObj, rx, ry, rw, rh) {
-    const ring = Math.max(2, Math.floor(RECT.ring / iiObj.ds));
-    const rectScore = scoreWindow(iiObj, rx, ry, rw, rh, ring);
-
-    if (rectScore < RECT.minRectScore) return null;
+  function evaluateCandidateFromRectScore(img, iiObj, cfg, rx, ry, rw, rh, rectScore) {
+    if (rectScore < cfg.minRectScore) return null;
 
     const rect = { x: rx * iiObj.ds, y: ry * iiObj.ds, w: rw * iiObj.ds, h: rh * iiObj.ds };
 
@@ -550,11 +529,13 @@ const FINE = {
 
     const cancel = cancelButtonSignature(img, rect);
     const closex = closeXSignature(img, rect);
-
     if (!(cancel.ok || closex.ok)) return null;
 
-    // Combined score: pb dominates, then cancel/close, then rectScore
-    const comb = (pb.score * 1.6) + (rectScore * 0.8) + (cancel.ok ? (0.18 + cancel.score * 0.6) : 0) + (closex.ok ? (0.10 + closex.score * 0.5) : 0);
+    const comb =
+      (pb.score * 1.6) +
+      (rectScore * 0.8) +
+      (cancel.ok ? (0.18 + cancel.score * 0.6) : 0) +
+      (closex.ok ? (0.10 + closex.score * 0.5) : 0);
 
     return {
       rectScore,
@@ -569,84 +550,54 @@ const FINE = {
     };
   }
 
-  function findTileCandidates(img) {
-  // Coarse pass: edge-only scan (no pb/cancel/close) to get a handful of likely windows quickly
-  const coarseII = buildEdgeIntegral(img, COARSE.ds, COARSE.edgeThr);
-  const sizesC = COARSE.sizes.map(s => ({
-    w: Math.max(12, Math.floor(s.w / COARSE.ds)),
-    h: Math.max(10, Math.floor(s.h / COARSE.ds))
-  }));
-  const ringC = Math.max(2, Math.floor(COARSE.ring / COARSE.ds));
-  const keepC = COARSE.keep;
+  function findTileCandidates(img, cfg) {
+    const iiObj = buildEdgeIntegral(img, cfg.ds, cfg.edgeThr);
+    const { W, H, ds } = iiObj;
 
-  const coarse = [];
-  function pushCoarse(item) {
-    coarse.push(item);
-    coarse.sort((a, b) => b.rectScore - a.rectScore);
-    if (coarse.length > keepC) coarse.length = keepC;
-  }
+    const sizes = cfg.sizes.map(s => ({
+      w: Math.max(14, Math.floor(s.w / ds)),
+      h: Math.max(12, Math.floor(s.h / ds))
+    }));
 
-  for (const sz of sizesC) {
-    const ww = sz.w, hh = sz.h;
-    if (ww >= coarseII.W || hh >= coarseII.H) continue;
+    // 1) Preselect windows by rectScore only (cheap)
+    const ring = Math.max(2, Math.floor(cfg.ring / ds));
+    const pre = [];
 
-    for (let y = 0; y <= coarseII.H - hh; y += COARSE.scanStep) {
-      for (let x = 0; x <= coarseII.W - ww; x += COARSE.scanStep) {
-        const rectScore = scoreWindow(coarseII, x, y, ww, hh, ringC);
-        if (rectScore < RECT.minRectScore) continue;
-        pushCoarse({ rx: x, ry: y, rw: ww, rh: hh, rectScore });
-      }
+    function pushPre(item) {
+      pre.push(item);
+      pre.sort((a, b) => b.rectScore - a.rectScore);
+      if (pre.length > cfg.preselectK) pre.length = cfg.preselectK;
     }
-  }
 
-  // Fine pass: full evaluation (pb + cancel/close) in a small neighborhood around coarse rectangles
-  const fineII = buildEdgeIntegral(img, RECT.ds, RECT.edgeThr);
-  const sizesF = RECT.sizes.map(s => ({
-    w: Math.max(12, Math.floor(s.w / RECT.ds)),
-    h: Math.max(10, Math.floor(s.h / RECT.ds))
-  }));
-
-  const tileKeep = 6;
-  const best = [];
-  function pushBest(c) {
-    best.push(c);
-    best.sort((a, b) => b.comb - a.comb);
-    if (best.length > tileKeep) best.length = tileKeep;
-  }
-
-  const pad = Math.max(12, Math.floor(FINE.padPx / RECT.ds));
-
-  for (const cc of coarse) {
-    const baseRectPx = { x: cc.rx * COARSE.ds, y: cc.ry * COARSE.ds, w: cc.rw * COARSE.ds, h: cc.rh * COARSE.ds };
-
-    // Convert neighborhood to fine (ds=4) coordinates
-    const minX = Math.max(0, Math.floor((baseRectPx.x - FINE.padPx) / RECT.ds));
-    const minY = Math.max(0, Math.floor((baseRectPx.y - FINE.padPx) / RECT.ds));
-    const maxX = Math.min(fineII.W - 1, Math.floor((baseRectPx.x + baseRectPx.w + FINE.padPx) / RECT.ds));
-    const maxY = Math.min(fineII.H - 1, Math.floor((baseRectPx.y + baseRectPx.h + FINE.padPx) / RECT.ds));
-
-    for (const sz of sizesF) {
+    for (const sz of sizes) {
       const ww = sz.w, hh = sz.h;
-      if (ww >= fineII.W || hh >= fineII.H) continue;
+      if (ww >= W || hh >= H) continue;
 
-      const xStart = Math.max(0, Math.min(minX, fineII.W - ww));
-      const yStart = Math.max(0, Math.min(minY, fineII.H - hh));
-      const xEnd = Math.max(0, Math.min(maxX, fineII.W - ww));
-      const yEnd = Math.max(0, Math.min(maxY, fineII.H - hh));
-
-      for (let y = yStart; y <= yEnd; y += RECT.scanStep) {
-        for (let x = xStart; x <= xEnd; x += RECT.scanStep) {
-          const c = evaluateRectCandidate(img, fineII, x, y, ww, hh);
-          if (c) pushBest(c);
+      for (let y = 0; y <= H - hh; y += cfg.scanStep) {
+        for (let x = 0; x <= W - ww; x += cfg.scanStep) {
+          const rectScore = scoreWindow(iiObj, x, y, ww, hh, ring);
+          if (rectScore >= cfg.minRectScore) pushPre({ x, y, w: ww, h: hh, rectScore });
         }
       }
     }
+
+    // 2) Run expensive feature checks only on preselected windows
+    const best = [];
+    function pushBest(c) {
+      best.push(c);
+      best.sort((a, b) => b.comb - a.comb);
+      if (best.length > cfg.tileKeep) best.length = cfg.tileKeep;
+    }
+
+    for (const p of pre) {
+      const c = evaluateCandidateFromRectScore(img, iiObj, cfg, p.x, p.y, p.w, p.h, p.rectScore);
+      if (c) pushBest(c);
+    }
+
+    return best;
   }
 
-  return best;
-}
-
-  // ---------- Scan pass (incremental tiles) ----------
+  // ---------- Scan pass (incremental tiles, coarse) ----------
   let scan = null;
 
   function initScan() {
@@ -654,14 +605,13 @@ const FINE = {
     if (!rs.w || !rs.h) return false;
 
     const preset = getScanPreset();
-    const bounds = applyScanPreset(preset, rs);
+    const bounds = applyScanPreset(preset);
 
     const yStart = Math.floor(rs.h * bounds.yStartFrac);
     const yMax = Math.floor(rs.h * bounds.yMaxFrac);
     const xMin = Math.floor(rs.w * bounds.xMinFrac);
     const xMax = Math.floor(rs.w * bounds.xMaxFrac);
 
-    // Clamp
     const yStartC = clamp(yStart, 0, rs.h - 1);
     const yMaxC = clamp(yMax, yStartC + 1, rs.h);
     const xMinC = clamp(xMin, 0, rs.w - 1);
@@ -678,9 +628,32 @@ const FINE = {
       ty: yStartC,
       tileIndex: 0,
       cands: [],
-      earlyExit: false
+      earlyExit: false,
+      lastPreviewBestKey: ""
     };
     return true;
+  }
+
+  function bestKey(c) {
+    if (!c) return "";
+    const r = c.absRect;
+    return `${Math.round(c.comb*1000)}:${r.x}|${r.y}|${r.w}|${r.h}`;
+  }
+
+  function maybePreview(capImg, tileRect, label, bestAbsRect) {
+    if (!capImg) return;
+
+    const inTile =
+      bestAbsRect &&
+      bestAbsRect.x >= tileRect.x && bestAbsRect.x < tileRect.x + tileRect.w &&
+      bestAbsRect.y >= tileRect.y && bestAbsRect.y < tileRect.y + tileRect.h;
+
+    drawRegionPreview(
+      capImg,
+      label,
+      inTile ? { x: bestAbsRect.x - tileRect.x, y: bestAbsRect.y - tileRect.y, w: bestAbsRect.w, h: bestAbsRect.h } : null,
+      "orange"
+    );
   }
 
   function scanStepOneTile() {
@@ -701,93 +674,151 @@ const FINE = {
 
     const w = Math.min(SCAN.tileW, scan.xMax - tx);
     const h = Math.min(SCAN.tileH, scan.yMax - ty);
-    const cap = captureRect({ x: tx, y: ty, w, h });
+    const tileRect = { x: tx, y: ty, w, h };
 
+    const cap = captureRect(tileRect);
     if (!cap.img) {
-      drawRegionPreview(null, `CAPTURE FAIL tile#${scan.tileIndex}`, null);
+      if (scan.tileIndex % SCAN.previewEveryTiles === 0) {
+        drawRegionPreview(null, `CAPTURE FAIL tile#${scan.tileIndex}`, null);
+      }
       return { done: false };
     }
 
-    // Find candidates in this tile
-    const tileCands = findTileCandidates(cap.img);
+    const tileCands = findTileCandidates(cap.img, RECT_COARSE);
 
-    // Convert to absolute coords and merge into global list
     for (const c of tileCands) {
-      const abs = {
-        ...c,
-        absRect: { x: tx + c.rect.x, y: ty + c.rect.y, w: c.rect.w, h: c.rect.h }
-      };
-      scan.cands.push(abs);
+      scan.cands.push({ ...c, absRect: { x: tx + c.rect.x, y: ty + c.rect.y, w: c.rect.w, h: c.rect.h } });
     }
 
-    // Keep global shortlist a bit larger during scan, prune later
     scan.cands.sort((a, b) => b.comb - a.comb);
-    if (scan.cands.length > 20) scan.cands.length = 20;
+    if (scan.cands.length > 30) scan.cands.length = 30;
 
-    // Early exit: if we already have a very strong candidate, stop scanning more tiles.
-    const bestNow = scan.cands[0];
-    if (bestNow && bestNow.comb >= SCAN.earlyExitComb) {
-      scan.ty = scan.yMax; // forces done on next tick
-      scan.earlyExit = { tile: scan.tileIndex, comb: bestNow.comb };
-    }
+    const best = scan.cands[0];
+    const bestAbsRect = best?.absRect;
 
-    
-// Preview (throttled): update every N tiles, or when a new best appears, or on early-exit
-const best = scan.cands[0] || null;
-const newBest = best && (scan.lastPreviewComb == null || best.comb > scan.lastPreviewComb + 0.02);
-const periodic = (scan.tileIndex % SCAN.previewEvery) === 0;
-const must = !!scan.earlyExit;
-
-if (best && (periodic || newBest || must)) {
-  scan.lastPreviewComb = best.comb;
-  drawRegionPreview(
-    cap.img,
-    `SCAN tile#${scan.tileIndex} best comb=${best.comb.toFixed(3)} rect=${best.rectScore.toFixed(3)} pb=${best.pbScore.toFixed(3)} cancel=${best.cancelOk ? best.cancelScore.toFixed(2) : "no"} close=${best.closeOk ? best.closeScore.toFixed(2) : "no"}`,
-    (best.absRect.x >= tx && best.absRect.x < tx + w && best.absRect.y >= ty && best.absRect.y < ty + h)
-      ? { x: best.absRect.x - tx, y: best.absRect.y - ty, w: best.absRect.w, h: best.absRect.h }
-      : null,
-    "orange"
-  );
-} else if (!best && periodic) {
-  drawRegionPreview(cap.img, `SCAN tile#${scan.tileIndex} (no candidates)`, null);
-}
-
-    setProgress(`tile ${scan.tileIndex}`);
-
-    // If early-exit was set above, finish immediately; the caller will start confirming.
-    if (scan.earlyExit) {
-      setStatus(`Early exit: strong candidate comb=${bestNow.comb.toFixed(3)} (preset ${scan.preset})`);
+    // Early-exit very strong candidate
+    if (best && best.comb >= SCAN.earlyExitComb) {
+      scan.ty = scan.yMax;
+      scan.earlyExit = { tile: scan.tileIndex, comb: best.comb };
+      setStatus(`Early exit: strong comb=${best.comb.toFixed(3)} (${scan.preset})`);
+      // show preview once
+      maybePreview(cap.img, tileRect,
+        `SCAN tile#${scan.tileIndex} early comb=${best.comb.toFixed(3)} pb=${best.pbScore.toFixed(3)} canc=${best.cancelOk?"y":"n"} close=${best.closeOk?"y":"n"}`,
+        bestAbsRect);
       return { done: true, early: true };
     }
 
+    // Earlier confirm trigger (good enough)
+    const second = scan.cands[1];
+    const canStartConfirm =
+      (best && best.comb >= SCAN.confirmNowComb && (best.cancelOk || best.closeOk)) ||
+      (best && second && best.comb >= SCAN.confirmNowComb2 && second.comb >= SCAN.confirmNowComb2);
+
+    if (canStartConfirm) {
+      scan.ty = scan.yMax;
+      scan.earlyExit = { tile: scan.tileIndex, comb: best.comb, note: "confirmNow" };
+      setStatus(`Candidate found: comb=${best.comb.toFixed(3)}. Confirming…`);
+      maybePreview(cap.img, tileRect,
+        `SCAN tile#${scan.tileIndex} candidate comb=${best.comb.toFixed(3)} pb=${best.pbScore.toFixed(3)} canc=${best.cancelOk?"y":"n"} close=${best.closeOk?"y":"n"}`,
+        bestAbsRect);
+      return { done: true, early: true };
+    }
+
+    // Preview throttling
+    const doInterval = (scan.tileIndex % SCAN.previewEveryTiles === 0);
+    const key = bestKey(best);
+    const doBestChange = (SCAN.previewOnlyOnBestChange && key && key !== scan.lastPreviewBestKey);
+
+    if (doInterval || doBestChange) {
+      scan.lastPreviewBestKey = key;
+      if (best) {
+        maybePreview(cap.img, tileRect,
+          `SCAN tile#${scan.tileIndex} best comb=${best.comb.toFixed(3)} pb=${best.pbScore.toFixed(3)} canc=${best.cancelOk ? best.cancelScore.toFixed(2) : "no"} close=${best.closeOk ? best.closeScore.toFixed(2) : "no"}`,
+          bestAbsRect);
+      } else {
+        maybePreview(cap.img, tileRect, `SCAN tile#${scan.tileIndex} (no candidates)`, null);
+      }
+    }
+
+    setProgress(`tile ${scan.tileIndex}`);
     return { done: false };
   }
 
+  // ---------- Fine refinement on top candidates ----------
+  function refineCandidates(topList, refineK) {
+    const rs = getRsSize();
+    const out = [];
+
+    for (let i = 0; i < Math.min(refineK, topList.length); i++) {
+      const c = topList[i];
+      const r = c.absRect;
+
+      // Expand a bit to allow fine scan to reposition.
+      const pad = 50;
+      const rx = clamp(r.x - pad, 0, rs.w - 1);
+      const ry = clamp(r.y - pad, 0, rs.h - 1);
+      const rw = clamp(r.w + pad * 2, 1, rs.w - rx);
+      const rh = clamp(r.h + pad * 2, 1, rs.h - ry);
+
+      const cap = captureRect({ x: rx, y: ry, w: rw, h: rh });
+      if (!cap.img) continue;
+
+      // Fine scan within this small region.
+      const tileCands = findTileCandidates(cap.img, RECT_FINE);
+      if (!tileCands.length) continue;
+
+      // Take best from region and convert to absolute.
+      const best = tileCands[0];
+      out.push({
+        ...best,
+        absRect: { x: rx + best.rect.x, y: ry + best.rect.y, w: best.rect.w, h: best.rect.h },
+        refinedFrom: { comb: c.comb, absRect: r }
+      });
+    }
+
+    // Add non-refined originals too, as fallback.
+    for (const c of topList) out.push(c);
+
+    out.sort((a, b) => b.comb - a.comb);
+
+    // De-dup very similar rects.
+    const dedup = [];
+    for (const c of out) {
+      const r = c.absRect;
+      const hit = dedup.find(d => {
+        const q = d.absRect;
+        return Math.abs(q.x - r.x) < 18 && Math.abs(q.y - r.y) < 18 && Math.abs(q.w - r.w) < 24 && Math.abs(q.h - r.h) < 18;
+      });
+      if (!hit) dedup.push(c);
+      if (dedup.length >= 12) break;
+    }
+
+    return dedup;
+  }
+
   // ---------- Two-frame confirm ----------
-  function featurePack(img, absRect) {
+  function featurePackFromRectCapture(img) {
     const rectRel = { x: 0, y: 0, w: img.width, h: img.height };
-    // Here img is already a capture of rect; so rectRel is full.
-    const pb = progressBarSignature(img, rectRel);
-    const cancel = cancelButtonSignature(img, rectRel);
-    const closex = closeXSignature(img, rectRel);
-    return { pb, cancel, closex };
+    return {
+      pb: progressBarSignature(img, rectRel),
+      cancel: cancelButtonSignature(img, rectRel),
+      closex: closeXSignature(img, rectRel)
+    };
   }
 
   function confirmCandidate(absRect, onDone) {
-    // Capture 1
     const cap1 = captureRect(absRect);
     if (!cap1.img) return onDone(false, { why: "cap1 fail" });
 
-    const f1 = featurePack(cap1.img, absRect);
+    const f1 = featurePackFromRectCapture(cap1.img);
     const ok1 = f1.pb.ok && (f1.cancel.ok || f1.closex.ok);
     if (!ok1) return onDone(false, { why: "features1 fail", f1 });
 
-    // Capture 2 after delay
     schedule(CONFIRM.delayMs, () => {
       const cap2 = captureRect(absRect);
       if (!cap2.img) return onDone(false, { why: "cap2 fail" });
 
-      const f2 = featurePack(cap2.img, absRect);
+      const f2 = featurePackFromRectCapture(cap2.img);
       const ok2 = f2.pb.ok && (f2.cancel.ok || f2.closex.ok);
       if (!ok2) return onDone(false, { why: "features2 fail", f1, f2 });
 
@@ -795,7 +826,9 @@ if (best && (periodic || newBest || must)) {
       const b2 = f2.pb.boundaryX;
       const move = (b1 >= 0 && b2 >= 0) ? Math.abs(b2 - b1) : 0;
 
-      const accept = (move >= CONFIRM.minBoundaryMovePx) || (f1.pb.score >= CONFIRM.pbStrong && f2.pb.score >= CONFIRM.pbStrong);
+      const accept =
+        (move >= CONFIRM.minBoundaryMovePx) ||
+        (f1.pb.score >= CONFIRM.pbStrong && f2.pb.score >= CONFIRM.pbStrong);
 
       onDone(accept, { move, f1, f2 });
     });
@@ -803,10 +836,10 @@ if (best && (periodic || newBest || must)) {
 
   // ---------- Learn stable anchor ----------
   function learnAnchorFromAbsRect(absRect) {
-    // Capture the dialog rect and take a stable patch near top-right frame (left of X).
     const cap = captureRect(absRect);
     if (!cap.img) return false;
 
+    // Stable patch: near top-right frame, left of close box area.
     const padX = 96, padY = 10;
     const patchW = 86, patchH = 28;
 
@@ -816,10 +849,8 @@ if (best && (periodic || newBest || must)) {
     py = clamp(py, 0, Math.max(0, cap.img.height - patchH));
 
     const bytes = cropRGBA(cap.img, px, py, patchW, patchH);
-
     saveJSON(LS_ANCHOR, { w: patchW, h: patchH, rgbaBase64: bytesToBase64(bytes) });
 
-    // Lock pos should be absolute coordinates of anchor patch top-left on screen:
     const ax = absRect.x + px;
     const ay = absRect.y + py;
     saveJSON(LS_LOCK_POS, { x: ax, y: ay });
@@ -886,7 +917,7 @@ if (best && (periodic || newBest || must)) {
     if (!running) return;
 
     setMode("Running");
-    setStatus("Auto-finding (bounded scan + shortlist)…");
+    setStatus("Auto-finding (coarse→fine + shortlist)…");
     setLock("none");
     setProgress("—");
 
@@ -901,16 +932,27 @@ if (best && (periodic || newBest || must)) {
 
       const step = scanStepOneTile();
       if (!step.done) {
-        schedule(12, scanTick);
+        schedule(10, scanTick);
         return;
       }
 
-      // Scan pass finished: prune shortlist to N
-      const list = (scan.cands || []).slice(0).sort((a, b) => b.comb - a.comb).slice(0, SCAN.shortlistN);
-      if (!list.length) {
+      // Coarse scan pass done: shortlist
+      const coarseList = (scan.cands || []).slice(0).sort((a, b) => b.comb - a.comb);
+      if (!coarseList.length) {
         setStatus("Auto-find: no candidates (retry)...");
         dbg(JSON.stringify({ stage: "scan", ok: false, note: "No candidates in bounded region." }, null, 2));
-        schedule(450, runAutoFind);
+        schedule(350, runAutoFind);
+        return;
+      }
+
+      // Fine refine top K
+      const refined = refineCandidates(coarseList.slice(0, 6), 3);
+
+      // Final shortlist
+      const list = refined.slice(0, SCAN.shortlistN);
+      if (!list.length) {
+        setStatus("Auto-find: refine produced no shortlist (retry)...");
+        schedule(350, runAutoFind);
         return;
       }
 
@@ -922,26 +964,24 @@ if (best && (periodic || newBest || must)) {
         if (idx >= list.length) {
           setStatus("Auto-find: shortlist failed (retry)...");
           dbg(JSON.stringify({ stage: "confirm", ok: false, note: "All shortlist candidates failed 2-frame confirm." }, null, 2));
-          schedule(450, runAutoFind);
+          schedule(350, runAutoFind);
           return;
         }
 
         const c = list[idx++];
         const absRect = c.absRect;
 
-        setStatus(`Confirming candidate ${idx}/${list.length} comb=${c.comb.toFixed(3)} pb=${c.pbScore.toFixed(3)}…`);
+        setStatus(`Confirming ${idx}/${list.length} comb=${c.comb.toFixed(3)} (ref=${c.refinedFrom ? "y" : "n"})…`);
         setProgress(`confirm ${idx}/${list.length}`);
 
         confirmCandidate(absRect, (ok, details) => {
           if (!running) return;
           if (!ok) {
             dbg(JSON.stringify({ stage: "confirm", ok: false, idx: idx - 1, comb: c.comb, details }, null, 2));
-            // try next immediately
             schedule(0, tryNext);
             return;
           }
 
-          // Learn anchor and verify immediately
           const learned = learnAnchorFromAbsRect(absRect);
           if (!learned) {
             dbg(JSON.stringify({ stage: "learn", ok: false, note: "Learn anchor failed" }, null, 2));
@@ -977,7 +1017,6 @@ if (best && (periodic || newBest || must)) {
     setStatus("Checking saved lock…");
     if (verifySavedAnchorOnce()) return;
 
-    // clear any partial state
     runAutoFind();
   }
 
@@ -1015,8 +1054,13 @@ if (best && (periodic || newBest || must)) {
     hasAnchor: !!loadJSON(LS_ANCHOR),
     scanPreset: (() => { try { return localStorage.getItem(LS_SCAN_PRESET) || "top"; } catch { return "top"; } })(),
     scanPresets: { top: "top 62% + center 70%", mid: "middle", bot: "bottom", full: "full screen" },
-    earlyExitComb: SCAN.earlyExitComb,
+    coarse: { ds: RECT_COARSE.ds, step: RECT_COARSE.scanStep, sizes: RECT_COARSE.sizes.length, preselectK: RECT_COARSE.preselectK },
+    fine: { ds: RECT_FINE.ds, step: RECT_FINE.scanStep, sizes: RECT_FINE.sizes.length, preselectK: RECT_FINE.preselectK },
     shortlist: SCAN.shortlistN,
-    note: "app_e: scan presets + early-exit + shortlist + stronger 2-frame confirm; anchor from stable top-right frame patch."
+    earlyExitComb: SCAN.earlyExitComb,
+    confirmNowComb: SCAN.confirmNowComb,
+    confirmNowComb2: SCAN.confirmNowComb2,
+    preview: { everyTiles: SCAN.previewEveryTiles, bestChange: SCAN.previewOnlyOnBestChange },
+    note: "app_f: coarse→fine + preview throttling + earlier confirm start; keeps Cancel/CloseX + 2-frame confirm; anchor from stable top-right patch."
   }, null, 2));
 })();
