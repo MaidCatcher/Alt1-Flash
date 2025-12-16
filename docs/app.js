@@ -132,13 +132,21 @@
   // RECTANGLE FALLBACK (SAFE HOOK)
   // ==================================================
   function fallbackScan(){
-    setStatus("Fallback scan…");
-    dbg("Rectangle detector running");
+  setStatus("Fallback scan…");
+  dbg("Rectangle detector running");
 
-    // Call existing auto-find if present
-    if(typeof window.startAutoFind==="function") window.startAutoFind();
-    else if(typeof window.autoFind==="function") window.autoFind();
+  // Ensure scan flags are enabled
+  window.scanning = true;
+  window.autoFinding = true;
+
+  // Kick the actual scan loop if it exists
+  if (typeof window.scanTick === "function") {
+    window.scanTick();
+  } else if (typeof window.runScanLoop === "function") {
+    window.runScanLoop();
   }
+}
+
 
   // Monkey-patch lock setter to learn anchors automatically
   if(typeof window.setLockedAt==="function"){
