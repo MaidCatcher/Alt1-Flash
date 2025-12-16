@@ -1,13 +1,8 @@
 // ProgFlash app.js — Adaptive anchor with rectangle (edge-density) auto-detect.
 // No shipped PNG templates. No color heuristics.
-// Stage A: scan tiles for "window-like" rectangles via edge-density scoring (gamma/theme safe).
+// Stage A: incremental scan tiles for "window-like" rectangles via edge-density scoring (gamma/theme safe).
 // Stage B: learn an anchor chunk (captured from user's pixels) around the best rectangle.
 // Stage C: on Start, verify saved anchor once; if ok, lock and stop scanning.
-// Buttons:
-// - Start: verify saved anchor once; if not found, run Auto find
-// - Auto find: run rectangle scan + learn new anchor
-// - Clear lock: clear saved lock+anchor
-// - Stop: stop scanning
 //
 // Requires matcher.js to provide: captureRegion(x,y,w,h) and findAnchor(haystack, needle, opts)
 
@@ -94,7 +89,7 @@
 
     // label
     ctx.fillStyle = "rgba(0,0,0,0.6)";
-    ctx.fillRect(6,6,Math.min(cw-12, 640),20);
+    ctx.fillRect(6,6,Math.min(cw-12, 740),20);
     ctx.fillStyle = "white";
     ctx.font = "12px Arial";
     ctx.fillText(label, 12, 21);
@@ -194,19 +189,14 @@
 
   // ------------------------------------------------------------
   // Stage A: rectangle detection via edge-density scoring
+  // (Incremental: one tile per tick so preview is truthful and UI doesn't stall)
   // ------------------------------------------------------------
   const TILE = { w: 640, h: 360 };
 
   const RECT = {
-    // downsample factor for speed: 4 => 160x90 per tile
     ds: 4,
-    // edge threshold in grayscale diff space (0-255)
     edgeThr: 28,
-    // step of scanning windows (in downsampled pixels)
     scanStep: 3,
-
-    // candidate sizes in original pixels (approx progress window)
-    // We'll evaluate these sizes in downsampled units.
     sizes: [
       { w: 440, h: 165 },
       { w: 420, h: 155 },
@@ -215,26 +205,22 @@
       { w: 360, h: 140 },
       { w: 340, h: 130 }
     ],
+    ring: 14,
+    minScore: 0.010,
 
-    // margin ring to compare "inside vs outside" edge density
-    ring: 14, // in original pixels
-
-    // accept threshold for a good candidate (relative; tuned to be permissive)
-    minScore: 0.010
+    // If TOP has any ok candidate, prefer TOP even if bottom is slightly higher.
+    topBias: 0.006
   };
 
   function toGray(r,g,b){
-    // integer luma-ish
     return (r*77 + g*150 + b*29) >> 8;
   }
 
   function buildEdgeIntegral(img, ds, edgeThr){
-    // Downsample by ds, compute simple edge magnitude on downsampled grid, then integral image.
     const W = Math.floor(img.width / ds);
     const H = Math.floor(img.height / ds);
     const gray = new Uint8Array(W * H);
 
-    // sample center of each ds block
     for (let y=0; y<H; y++){
       for (let x=0; x<W; x++){
         const sx = x*ds;
@@ -245,7 +231,6 @@
       }
     }
 
-    // edge map (0/1)
     const edge = new Uint8Array(W * H);
     for (let y=1; y<H-1; y++){
       for (let x=1; x<W-1; x++){
@@ -257,10 +242,8 @@
       }
     }
 
-    // integral image (prefix sums) size (W+1)*(H+1)
     const IW = W + 1;
-    const IH = H + 1;
-    const ii = new Uint32Array(IW * IH);
+    const ii = new Uint32Array((W+1) * (H+1));
     for (let y=1; y<=H; y++){
       let rowsum = 0;
       const rowOff = y*IW;
@@ -275,15 +258,13 @@
   }
 
   function rectSum(ii, IW, x, y, w, h){
-    // sum in [x, x+w) x [y, y+h) on integral image ii with stride IW
     const x2 = x + w;
     const y2 = y + h;
     return ii[y2*IW + x2] - ii[y2*IW + x] - ii[y*IW + x2] + ii[y*IW + x];
   }
 
   function scoreWindow(iiObj, x, y, w, h, ring){
-    // Score = (edge density inside) - (edge density in surrounding ring)
-    const { W, H, ii } = iiObj;
+    const { W, ii } = iiObj;
     const IW = W + 1;
 
     const inside = rectSum(ii, IW, x, y, w, h);
@@ -291,9 +272,9 @@
     const insideD = inside / insideArea;
 
     const rx = clamp(x - ring, 0, W-1);
-    const ry = clamp(y - ring, 0, H-1);
+    const ry = clamp(y - ring, 0, iiObj.H-1);
     const rx2 = clamp(x + w + ring, 0, W);
-    const ry2 = clamp(y + h + ring, 0, H);
+    const ry2 = clamp(y + h + ring, 0, iiObj.H);
     const rw = Math.max(1, rx2 - rx);
     const rh = Math.max(1, ry2 - ry);
 
@@ -301,7 +282,6 @@
     const outerArea = Math.max(1, rw*rh);
     const outerD = outer / outerArea;
 
-    // inside higher than outer tends to prefer UI windows over noisy scenes
     return insideD - outerD * 0.75;
   }
 
@@ -309,15 +289,13 @@
     const iiObj = buildEdgeIntegral(img, RECT.ds, RECT.edgeThr);
     const { W, H, ds } = iiObj;
 
-    // Convert candidate sizes to downsampled units
     const sizes = RECT.sizes.map(s => ({
       w: Math.max(12, Math.floor(s.w / ds)),
       h: Math.max(10, Math.floor(s.h / ds))
     }));
 
     const ring = Math.max(2, Math.floor(RECT.ring / ds));
-
-    let best = { score: -1e9, x: 0, y: 0, w: 0, h: 0, insideD: 0 };
+    let best = { score: -1e9, x: 0, y: 0, w: 0, h: 0 };
 
     for (const sz of sizes) {
       const ww = sz.w, hh = sz.h;
@@ -326,15 +304,12 @@
       for (let y=0; y<=H-hh; y+=RECT.scanStep) {
         for (let x=0; x<=W-ww; x+=RECT.scanStep) {
           const sc = scoreWindow(iiObj, x, y, ww, hh, ring);
-          if (sc > best.score) {
-            best = { score: sc, x, y, w: ww, h: hh };
-          }
+          if (sc > best.score) best = { score: sc, x, y, w: ww, h: hh };
         }
       }
     }
 
-    // Convert back to original pixel coords (approx)
-    const out = {
+    return {
       ok: best.score >= RECT.minScore,
       score: best.score,
       x: best.x * ds,
@@ -342,62 +317,101 @@
       w: best.w * ds,
       h: best.h * ds
     };
-    return out;
   }
 
-  function stageAFindProgressRect(){
+  // Incremental scan cursor
+  let scan = null;
+
+  function stageAResetScan(){
     const rs = getRsSize();
-    if (!rs.w || !rs.h) return null;
+    if (!rs.w || !rs.h) return false;
 
-    const halves = [
-      { name: "TOP",    y0: 0,                y1: Math.floor(rs.h / 2) },
-      { name: "BOTTOM", y0: Math.floor(rs.h / 2), y1: rs.h }
-    ];
+    scan = {
+      rs,
+      halves: [
+        { name: "TOP", y0: 0, y1: Math.floor(rs.h / 2) },
+        { name: "BOTTOM", y0: Math.floor(rs.h / 2), y1: rs.h }
+      ],
+      halfIdx: 0,
+      tx: 0,
+      ty: 0,
+      tileIndex: 0,
+      bestTop: null,
+      bestBottom: null
+    };
 
-    let globalBest = null;
-    let tileIndex = 0;
+    scan.ty = scan.halves[0].y0;
+    scan.tx = 0;
+    return true;
+  }
 
-    for (const half of halves) {
-      for (let ty = half.y0; ty < half.y1; ty += TILE.h) {
-        for (let tx = 0; tx < rs.w; tx += TILE.w) {
-          tileIndex++;
+  function stageAStepOneTile(){
+    if (!scan) return { done: true, hit: null };
 
-          const w = Math.min(TILE.w, rs.w - tx);
-          const h = Math.min(TILE.h, half.y1 - ty);
+    const { rs, halves } = scan;
 
-          const cap = captureRect({ x: tx, y: ty, w, h });
-          if (!cap.img) continue;
-
-          const r = findBestRectangleInTile(cap.img);
-
-          // show overlay
-          drawRegionPreview(
-            cap.img,
-            `RECT ${half.name} tile#${tileIndex} (${tx},${ty}) score=${r.score.toFixed(3)}`,
-            r.ok ? { x: r.x, y: r.y, w: r.w, h: r.h } : null,
-            r.ok ? "orange" : null
-          );
-
-          if (r.ok) {
-            const hit = {
-              score: r.score,
-              absX: tx + r.x,
-              absY: ty + r.y,
-              w: r.w,
-              h: r.h,
-              half: half.name
-            };
-            if (!globalBest || hit.score > globalBest.score) globalBest = hit;
-
-            // prefer good hits in top half quickly
-            if (hit.half === "TOP" && hit.score >= RECT.minScore + 0.010) return hit;
-          }
-        }
+    // If finished all halves
+    if (scan.halfIdx >= halves.length) {
+      // Prefer TOP if it has any ok candidate, unless bottom beats it by a lot.
+      let best = scan.bestTop || scan.bestBottom || null;
+      if (scan.bestTop && scan.bestBottom) {
+        if (scan.bestBottom.score > scan.bestTop.score + RECT.topBias) best = scan.bestBottom;
+        else best = scan.bestTop;
       }
-      if (globalBest && globalBest.half === "TOP") return globalBest;
+      return { done: true, hit: best };
     }
 
-    return globalBest;
+    const half = halves[scan.halfIdx];
+
+    // If finished this half (ty past end)
+    if (scan.ty >= half.y1) {
+      scan.halfIdx++;
+      if (scan.halfIdx < halves.length) {
+        scan.ty = halves[scan.halfIdx].y0;
+        scan.tx = 0;
+      }
+      return { done: false, hit: null };
+    }
+
+    // If finished row, move to next row
+    if (scan.tx >= rs.w) {
+      scan.tx = 0;
+      scan.ty += TILE.h;
+      return { done: false, hit: null };
+    }
+
+    const tx = scan.tx;
+    const ty = scan.ty;
+    scan.tx += TILE.w;
+    scan.tileIndex++;
+
+    const w = Math.min(TILE.w, rs.w - tx);
+    const h = Math.min(TILE.h, half.y1 - ty);
+    const cap = captureRect({ x: tx, y: ty, w, h });
+    if (!cap.img) {
+      drawRegionPreview(null, `CAPTURE FAIL ${half.name} tile#${scan.tileIndex}`, null);
+      return { done: false, hit: null };
+    }
+
+    const r = findBestRectangleInTile(cap.img);
+
+    drawRegionPreview(
+      cap.img,
+      `SCAN ${half.name} tile#${scan.tileIndex} (${tx},${ty}) score=${r.score.toFixed(3)}`,
+      r.ok ? { x: r.x, y: r.y, w: r.w, h: r.h } : null,
+      r.ok ? "orange" : null
+    );
+
+    if (r.ok) {
+      const hit = { score: r.score, absX: tx + r.x, absY: ty + r.y, w: r.w, h: r.h, half: half.name };
+      if (half.name === "TOP") {
+        if (!scan.bestTop || hit.score > scan.bestTop.score) scan.bestTop = hit;
+      } else {
+        if (!scan.bestBottom || hit.score > scan.bestBottom.score) scan.bestBottom = hit;
+      }
+    }
+
+    return { done: false, hit: null };
   }
 
   // ------------------------------------------------------------
@@ -407,12 +421,7 @@
     const rs = getRsSize();
     if (!rs.w || !rs.h) return false;
 
-    // Anchor capture region: slightly expanded rectangle to include border/texture, exclude dynamic fill if possible.
-    // We'll bias towards the top-right corner area (usually stable: title + frame + x-corner), but we don't need the X.
-    const padL = 30;
-    const padT = 30;
-    const padR = 30;
-    const padB = 30;
+    const padL = 30, padT = 30, padR = 30, padB = 30;
 
     let ax = hit.absX - padL;
     let ay = hit.absY - padT;
@@ -430,7 +439,6 @@
     const bytes = cropRGBA(cap.img, 0, 0, aw, ah);
     saveJSON(LS_ANCHOR, { w: aw, h: ah, rgbaBase64: bytesToBase64(bytes) });
 
-    // Lock position = anchor origin (top-left of saved anchor)
     saveJSON(LS_LOCK_POS, { x: ax, y: ay });
     updateSavedLockLabel();
 
@@ -517,11 +525,26 @@
     setLock("none");
     setProgress("—");
 
-    schedule(0, () => {
+    if (!stageAResetScan()) {
+      setStatus("Auto-find: bad RS dims");
+      schedule(600, runAutoFindLoop);
+      return;
+    }
+
+    const tick = () => {
       if (!running) return;
 
-      const hit = stageAFindProgressRect();
+      const step = stageAStepOneTile();
 
+      // Still scanning
+      if (!step.done) {
+        // 0ms can still be okay, but 15–25ms keeps UI very responsive.
+        schedule(15, tick);
+        return;
+      }
+
+      // Done scanning all tiles
+      const hit = step.hit;
       if (!hit) {
         setStatus("Auto-find: no rectangle yet (retrying)...");
         dbg(JSON.stringify({ stage: "rect", ok: false, note: "Retry in 600ms" }, null, 2));
@@ -529,7 +552,7 @@
         return;
       }
 
-      setStatus(`Rectangle hit (score ${hit.score.toFixed(3)}). Learning anchor…`);
+      setStatus(`Rectangle hit (${hit.half}) score ${hit.score.toFixed(3)}. Learning anchor…`);
 
       const ok = learnAnchorFromRect(hit);
       if (!ok) {
@@ -543,7 +566,9 @@
 
       setStatus("Learned anchor verify failed (retrying)...");
       schedule(600, runAutoFindLoop);
-    });
+    };
+
+    schedule(0, tick);
   }
 
   async function start(){
@@ -595,6 +620,6 @@
     app: { version: APP_VERSION, build: BUILD_ID },
     savedLock: loadJSON(LS_LOCK_POS),
     hasAnchor: !!loadJSON(LS_ANCHOR),
-    note: "Rectangle mode: Auto find detects window-like rectangle, learns anchor once, then Start verifies and stops scanning."
+    note: "Rectangle mode: incremental scan so preview matches scan order; learns anchor once, then Start verifies and stops scanning."
   }, null, 2));
 })();
