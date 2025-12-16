@@ -1,8 +1,13 @@
-// ProgFlash app.js — Auto-find once, save lock, stop scanning.
-// Stage1: scan for X-corner template (top half first, then bottom).
-// Optional fallback Stage1b: scan for hourglass seed (if provided) then try X-corner locally.
-// After first lock: save lockPos + a user-captured lockAnchor chunk for fast verify on next Start.
-// No calibration required.
+// ProgFlash app.js — Pivot to adaptive anchor learning (no shipped templates)
+//
+// Goal:
+// - Fully automatic: detect progress window by heuristics (CANCEL orange + red X corner)
+// - Learn a user-specific anchor patch once and store it
+// - After locked once: stop scanning
+// - Start later: verify saved anchor once; if ok stop; else re-find
+//
+// Requires matcher.js exports: captureRegion(), findAnchor()
+// (We use findAnchor only for verification against the learned patch)
 
 const statusEl = document.getElementById("status");
 const modeEl   = document.getElementById("mode");
@@ -30,8 +35,9 @@ function dbg(v){ dbgEl.textContent = String(v); }
 const APP_VERSION = window.APP_VERSION || "unknown";
 const BUILD_ID = window.BUILD_ID || ("build-" + Date.now());
 
-const LS_LOCK = "progflash.lockPos";           // {x,y}
-const LS_LOCK_ANCHOR = "progflash.lockAnchor"; // {w,h,rgbaBase64,dx,dy}
+const LS_LOCK = "progflash.lockPos";            // {x,y}
+const LS_ANCHOR = "progflash.learnedAnchor";    // {w,h,rgbaBase64,dx,dy} dx/dy is where x-corner sits within anchor
+const LS_NOTE = "progflash.note";
 
 function loadJSON(key){
   try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : null; } catch { return null; }
@@ -53,53 +59,13 @@ function getRsSize(){
   return { w: alt1.rsWidth || 0, h: alt1.rsHeight || 0 };
 }
 
-// --- Template handling (important) ---
-function forceOpaque(img){
-  // If template PNG has alpha/transparent background, matcher may skip pixels.
-  if (!img || !img.data) return img;
-  for (let i = 0; i < img.data.length; i += 4) img.data[i + 3] = 255;
-  return img;
-}
-
-function alphaStats(img){
-  if (!img || !img.data) return null;
-  let minA = 255, maxA = 0;
-  for (let i = 0; i < img.data.length; i += 4) {
-    const a = img.data[i + 3];
-    if (a < minA) minA = a;
-    if (a > maxA) maxA = a;
-  }
-  return { minA, maxA, w: img.width, h: img.height };
-}
-
-// base64 helpers for saving lockAnchor
-function bytesToBase64(bytes){
-  let s = "";
-  for (let i=0;i<bytes.length;i++) s += String.fromCharCode(bytes[i]);
-  return btoa(s);
-}
-function base64ToBytes(b64){
-  const bin = atob(b64);
-  const out = new Uint8ClampedArray(bin.length);
-  for (let i=0;i<bin.length;i++) out[i] = bin.charCodeAt(i) & 255;
-  return out;
-}
-function rgba(r,g,b,a){ return (r&255) | ((g&255)<<8) | ((b&255)<<16) | ((a&255)<<24); }
-function makeNeedleFromRGBA(w,h,bytes){
-  return {
-    width: w,
-    height: h,
-    data: bytes,
-    getPixel(x,y){
-      if (x < 0 || y < 0 || x >= w || y >= h) return 0;
-      const i = (y*w + x) * 4;
-      return rgba(bytes[i], bytes[i+1], bytes[i+2], bytes[i+3]);
-    }
-  };
+function captureRect(r){
+  const img = captureRegion(r.x, r.y, r.w, r.h);
+  return { rect: r, img };
 }
 
 // --- Preview drawing ---
-function drawRegionPreview(regionImg, label, matchXY, needle){
+function drawRegionPreview(regionImg, label, box){
   if (!regionImg) return;
 
   const srcW = regionImg.width, srcH = regionImg.height;
@@ -123,71 +89,67 @@ function drawRegionPreview(regionImg, label, matchXY, needle){
 
   // label
   ctx.fillStyle = "rgba(0,0,0,0.6)";
-  ctx.fillRect(6,6,Math.min(cw-12, 420),20);
+  ctx.fillRect(6,6,Math.min(cw-12, 520),20);
   ctx.fillStyle = "white";
   ctx.font = "12px Arial";
   ctx.fillText(label, 12, 21);
 
-  // match box
-  if (matchXY && needle) {
-    const fx = offX + Math.floor(matchXY.x * scale);
-    const fy = offY + Math.floor(matchXY.y * scale);
-    const fw = Math.floor(needle.width * scale);
-    const fh = Math.floor(needle.height * scale);
+  if (box) {
+    const fx = offX + Math.floor(box.x * scale);
+    const fy = offY + Math.floor(box.y * scale);
+    const fw = Math.floor(box.w * scale);
+    const fh = Math.floor(box.h * scale);
     ctx.lineWidth = 2;
-    ctx.strokeStyle = "deepskyblue";
+    ctx.strokeStyle = box.color || "deepskyblue";
     ctx.strokeRect(fx, fy, fw, fh);
   }
 }
 
-// --- Matching helpers ---
-function findInImage(hay, needle, opts){
-  const res = findAnchor(hay, needle, opts);
-  const score = res && typeof res.score === "number" ? res.score : 0;
-  const ok = !!(res && res.ok && score >= (opts.acceptScore ?? 0));
-  return { ok, x: res?.x ?? 0, y: res?.y ?? 0, score };
+// --- Learned anchor representation for findAnchor() ---
+function bytesToBase64(bytes){
+  let s = "";
+  for (let i=0;i<bytes.length;i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s);
+}
+function base64ToBytes(b64){
+  const bin = atob(b64);
+  const out = new Uint8ClampedArray(bin.length);
+  for (let i=0;i<bin.length;i++) out[i] = bin.charCodeAt(i) & 255;
+  return out;
+}
+function rgba(r,g,b,a){ return (r&255)|((g&255)<<8)|((b&255)<<16)|((a&255)<<24); }
+function makeNeedleFromRGBA(w,h,bytes){
+  return {
+    width: w,
+    height: h,
+    data: bytes,
+    getPixel(x,y){
+      if (x < 0 || y < 0 || x >= w || y >= h) return 0;
+      const i = (y*w + x) * 4;
+      return rgba(bytes[i], bytes[i+1], bytes[i+2], bytes[i+3]);
+    }
+  };
+}
+function cropRGBA(img, x, y, w, h){
+  const out = new Uint8ClampedArray(w*h*4);
+  let k = 0;
+  for (let yy=0; yy<h; yy++){
+    for (let xx=0; xx<w; xx++){
+      const si = ((y+yy) * img.width + (x+xx)) * 4;
+      out[k++] = img.data[si+0];
+      out[k++] = img.data[si+1];
+      out[k++] = img.data[si+2];
+      out[k++] = img.data[si+3];
+    }
+  }
+  // Force opaque so matcher never skips pixels due to alpha
+  for (let i=0;i<out.length;i+=4) out[i+3] = 255;
+  return out;
 }
 
-function captureRect(r){
-  const img = captureRegion(r.x, r.y, r.w, r.h);
-  return { rect: r, img };
-}
-
-// --- Finder tuning ---
-// Stage1 uses templates only as a locator: tile scan, top then bottom.
-// Stage2 optional fallback: if hourglass seed hits, scan locally for x_corner.
-const STAGE1 = {
-  tileW: 640,
-  tileH: 360,
-  step: 4,
-  tolerance: 95,
-  minAccept: 0.52,      // accept match to lock
-  earlyScore: 0.85      // early return
-};
-
-const STAGE2 = {
-  localW: 900,
-  localH: 520,
-  step: 2,
-  tolerance: 90,
-  minAccept: 0.60
-};
-
-const VERIFY = {
-  pad: 240,
-  step: 2,
-  tolerance: 90,
-  minAccept: 0.70
-};
-
-// --- State ---
+// --- Loop control ---
 let running = false;
 let loopHandle = null;
-
-let lockPos = loadJSON(LS_LOCK); // {x,y}
-
-let tplXCorner = null;
-let tplHourglass = null; // optional
 
 function stopLoop(){
   if (loopHandle) clearTimeout(loopHandle);
@@ -198,77 +160,181 @@ function schedule(ms, fn){
   loopHandle = setTimeout(fn, ms);
 }
 
-// --- Template loader ---
-async function loadFirstExisting(paths){
-  for (const p of paths) {
-    const img = await loadImage(p + (p.includes("?") ? "&" : "?") + "v=" + encodeURIComponent(BUILD_ID));
-    if (img) return { path: p, img };
+// ============================================================
+// Heuristic Finder (no templates)
+// ============================================================
+
+// Color tests (tuned for RS UI style; forgiving)
+function isOrangeCancel(r,g,b){
+  // orange-ish / amber
+  return (r >= 150 && r <= 255) && (g >= 70 && g <= 170) && (b >= 0 && b <= 120) && (r > g) && (g > b);
+}
+function isRedX(r,g,b){
+  // red-ish (X icon)
+  return (r >= 170) && (g <= 120) && (b <= 120) && (r > g + 40) && (r > b + 40);
+}
+
+// Downsample scan for orange density
+function findCancelCandidate(fullImg){
+  const rsW = fullImg.width, rsH = fullImg.height;
+
+  // Prefer top half first
+  const halves = [
+    { name: "TOP", y0: 0, y1: Math.floor(rsH/2) },
+    { name: "BOTTOM", y0: Math.floor(rsH/2), y1: rsH }
+  ];
+
+  // Step controls speed vs detection
+  const step = 6; // sampling stride
+  // Window size for scanning the CANCEL button region (approx)
+  const winW = 180;
+  const winH = 70;
+
+  let best = { score: 0, x: 0, y: 0, half: "TOP" };
+
+  // We score a window by counting orange hits in that area
+  // To keep it simple/fast, we do sparse sampling inside each window.
+  const innerStep = 6;
+
+  for (const half of halves) {
+    for (let y = half.y0; y < half.y1 - winH; y += winH) {
+      for (let x = 0; x < rsW - winW; x += winW) {
+
+        let hits = 0;
+        let total = 0;
+
+        for (let yy = 0; yy < winH; yy += innerStep) {
+          const py = y + yy;
+          for (let xx = 0; xx < winW; xx += innerStep) {
+            const px = x + xx;
+            const i = (py * rsW + px) * 4;
+            const r = fullImg.data[i], g = fullImg.data[i+1], b = fullImg.data[i+2];
+            total++;
+            if (isOrangeCancel(r,g,b)) hits++;
+          }
+        }
+
+        const score = total ? (hits / total) : 0;
+        if (score > best.score) best = { score, x, y, half: half.name };
+      }
+    }
+
+    // if top is decent, don’t bother bottom
+    if (best.half === "TOP" && best.score >= 0.06) break;
   }
-  return null;
+
+  // Threshold: needs some orange concentration
+  if (best.score < 0.04) return null;
+
+  return {
+    half: best.half,
+    // center-ish of the window we scored
+    cx: best.x + Math.floor(winW/2),
+    cy: best.y + Math.floor(winH/2),
+    score: best.score,
+    box: { x: best.x, y: best.y, w: winW, h: winH }
+  };
 }
 
-async function loadTemplates(){
-  // Required: x_corner
-  const xc = await loadFirstExisting([
-    "img/x_corner.png",
-    "x_corner.png"
-  ]);
+// Given a cancel candidate, search nearby for red X corner
+function findRedXNear(fullImg, seed){
+  const rsW = fullImg.width, rsH = fullImg.height;
 
-  // Optional: hourglass seed (fallback only)
-  const hg = await loadFirstExisting([
-    "img/hourglass_crop.png",
-    "hourglass_crop.png",
-    "img/hourglass_icon.png",
-    "hourglass_icon.png"
-  ]);
+  // Search region above and to the right of the cancel area (progress window top-right)
+  const rx = clamp(seed.cx - 250, 0, rsW-1);
+  const ry = clamp(seed.cy - 260, 0, rsH-1);
+  const rw = clamp(520, 1, rsW - rx);
+  const rh = clamp(320, 1, rsH - ry);
 
-  return { xc, hg };
-}
+  // Find the topmost-rightmost red-ish pixel cluster
+  // We’ll pick the best candidate with a small neighborhood density.
+  const step = 2;
 
-// --- Lock + saved anchor chunk ---
-function cropRGBAFromCapture(img, x, y, w, h){
-  const bytes = new Uint8ClampedArray(w*h*4);
-  let idx = 0;
-  for (let yy=0; yy<h; yy++){
-    for (let xx=0; xx<w; xx++){
-      const si = ((y+yy) * img.width + (x+xx)) * 4;
-      bytes[idx++] = img.data[si+0];
-      bytes[idx++] = img.data[si+1];
-      bytes[idx++] = img.data[si+2];
-      bytes[idx++] = img.data[si+3];
+  let best = null;
+
+  for (let y = 0; y < rh; y += step) {
+    for (let x = 0; x < rw; x += step) {
+      const i = ((ry + y) * rsW + (rx + x)) * 4;
+      const r = fullImg.data[i], g = fullImg.data[i+1], b = fullImg.data[i+2];
+
+      if (!isRedX(r,g,b)) continue;
+
+      // neighborhood density check (avoid random red particles)
+      let redHits = 0;
+      let n = 0;
+      for (let yy = -6; yy <= 6; yy += 2) {
+        const py = y + yy;
+        if (py < 0 || py >= rh) continue;
+        for (let xx = -6; xx <= 6; xx += 2) {
+          const px = x + xx;
+          if (px < 0 || px >= rw) continue;
+          const ii = ((ry + py) * rsW + (rx + px)) * 4;
+          const rr = fullImg.data[ii], gg = fullImg.data[ii+1], bb = fullImg.data[ii+2];
+          n++;
+          if (isRedX(rr,gg,bb)) redHits++;
+        }
+      }
+
+      const density = n ? (redHits / n) : 0;
+      if (density < 0.25) continue;
+
+      const cand = { x: rx + x, y: ry + y, density };
+
+      // Prefer smaller y (top) and larger x (right)
+      if (!best) best = cand;
+      else {
+        if (cand.y < best.y - 3) best = cand;
+        else if (Math.abs(cand.y - best.y) <= 3 && cand.x > best.x) best = cand;
+        else if (cand.density > best.density + 0.10) best = cand;
+      }
     }
   }
-  return bytes;
+
+  if (!best) return null;
+
+  return {
+    x: best.x,
+    y: best.y,
+    density: best.density,
+    searchBox: { x: rx, y: ry, w: rw, h: rh }
+  };
 }
 
-function saveUserLockAnchorFromXCorner(xCornerAbsX, xCornerAbsY){
-  // Capture a stable-ish chunk around the x-corner.
-  // This becomes the verify template next time, tailored to THIS user pixels.
-  const rs = getRsSize();
-  if (!rs.w || !rs.h) return;
+// Learn and save anchor patch around the x-corner
+function learnAnchorAt(fullImg, xCorner){
+  const rsW = fullImg.width, rsH = fullImg.height;
 
-  const dx = 8, dy = 8;   // capture starts slightly above/left of x-corner
-  const w = 150, h = 100; // chunk size
-  let ax = xCornerAbsX - dx;
-  let ay = xCornerAbsY - dy;
-  ax = clamp(ax, 0, rs.w - 1);
-  ay = clamp(ay, 0, rs.h - 1);
-  const aw = clamp(w, 1, rs.w - ax);
-  const ah = clamp(h, 1, rs.h - ay);
+  // Anchor patch size: big enough to be unique, small enough to verify fast
+  const aw = 220;
+  const ah = 140;
 
-  const cap = captureRect({ x: ax, y: ay, w: aw, h: ah });
-  if (!cap.img) return;
+  // Place x-corner near the top-right of anchor patch but include some left/below texture
+  const dx = 200; // xCorner is dx pixels from anchor left
+  const dy = 18;  // yCorner is dy pixels from anchor top
 
-  const bytes = cropRGBAFromCapture(cap.img, 0, 0, aw, ah);
-  saveJSON(LS_LOCK_ANCHOR, { w: aw, h: ah, rgbaBase64: bytesToBase64(bytes), dx, dy });
+  let ax = clamp(xCorner.x - dx, 0, rsW-1);
+  let ay = clamp(xCorner.y - dy, 0, rsH-1);
+  const w = clamp(aw, 1, rsW - ax);
+  const h = clamp(ah, 1, rsH - ay);
+
+  const bytes = cropRGBA(fullImg, ax, ay, w, h);
+
+  saveJSON(LS_ANCHOR, {
+    w, h,
+    rgbaBase64: bytesToBase64(bytes),
+    dx, dy
+  });
+
+  return { ax, ay, w, h, dx, dy };
 }
+
+// ============================================================
+// Lock / Verify flow
+// ============================================================
 
 function setLockedAt(x, y, note){
-  lockPos = { x, y };
-  saveJSON(LS_LOCK, lockPos);
+  saveJSON(LS_LOCK, { x, y });
   updateSavedLockLabel();
-
-  running = true;
 
   setStatus("Locked (scanning stopped)");
   setMode("Running");
@@ -278,293 +344,155 @@ function setLockedAt(x, y, note){
   dbg(JSON.stringify({
     app: { version: APP_VERSION, build: BUILD_ID },
     locked: true,
-    lockPos,
-    note: note || "Scanning stopped until Auto find is pressed."
+    lockPos: { x, y },
+    note
   }, null, 2));
 
   stopLoop();
 }
 
-// --- Verify saved lock on Start ---
-function verifySavedLockOnce(){
-  if (!lockPos) return false;
+function clearSaved(){
+  delKey(LS_LOCK);
+  delKey(LS_ANCHOR);
+  delKey(LS_NOTE);
+  updateSavedLockLabel();
+  setLock("none");
+  setProgress("—");
+}
+
+function verifySavedOnce(){
+  const lockPos = loadJSON(LS_LOCK);
+  const learned = loadJSON(LS_ANCHOR);
+  if (!lockPos || !learned) return false;
+
   const rs = getRsSize();
   if (!rs.w || !rs.h) return false;
 
-  const stored = loadJSON(LS_LOCK_ANCHOR);
-  const needle = stored
-    ? makeNeedleFromRGBA(stored.w, stored.h, base64ToBytes(stored.rgbaBase64))
-    : tplXCorner;
+  const needle = makeNeedleFromRGBA(learned.w, learned.h, base64ToBytes(learned.rgbaBase64));
 
-  if (!needle) return false;
+  // Verify in a small region around saved lock
+  const pad = 260;
 
-  const pad = VERIFY.pad;
-
-  let rx = Math.floor(lockPos.x - pad);
-  let ry = Math.floor(lockPos.y - pad);
-  rx = clamp(rx, 0, rs.w - 1);
-  ry = clamp(ry, 0, rs.h - 1);
-  const rw = clamp(pad * 2, 1, rs.w - rx);
-  const rh = clamp(pad * 2, 1, rs.h - ry);
+  let rx = clamp(lockPos.x - pad, 0, rs.w-1);
+  let ry = clamp(lockPos.y - pad, 0, rs.h-1);
+  const rw = clamp(pad*2, 1, rs.w - rx);
+  const rh = clamp(pad*2, 1, rs.h - ry);
 
   const cap = captureRect({ x: rx, y: ry, w: rw, h: rh });
   if (!cap.img) return false;
 
-  const m = findInImage(cap.img, needle, {
-    tolerance: VERIFY.tolerance,
+  const res = findAnchor(cap.img, needle, {
+    tolerance: 85,
     minScore: 0.01,
-    step: VERIFY.step,
-    ignoreAlphaBelow: 0,
-    acceptScore: VERIFY.minAccept
+    step: 2,
+    ignoreAlphaBelow: 0
   });
 
-  drawRegionPreview(cap.img, stored ? "VERIFY (saved lockAnchor)" : "VERIFY (x_corner)", m.ok ? { x:m.x, y:m.y } : null, needle);
+  const score = res?.score ?? 0;
+  const ok = !!(res?.ok && score >= 0.70);
 
-  if (!m.ok) return false;
+  drawRegionPreview(cap.img, `VERIFY learned anchor score=${score.toFixed(2)}`, ok ? { x: res.x, y: res.y, w: needle.width, h: needle.height, color: "lime" } : null);
 
-  const dx = stored?.dx ?? 0;
-  const dy = stored?.dy ?? 0;
+  if (!ok) return false;
 
-  const foundX = cap.rect.x + m.x + dx;
-  const foundY = cap.rect.y + m.y + dy;
+  // Convert match back to x-corner coordinate
+  const foundAx = cap.rect.x + res.x;
+  const foundAy = cap.rect.y + res.y;
+  const xCornerX = foundAx + learned.dx;
+  const xCornerY = foundAy + learned.dy;
 
-  setLockedAt(foundX, foundY, "Verified saved lock; scanning stopped.");
+  setLockedAt(xCornerX, xCornerY, "Verified learned anchor; scanning stopped.");
   return true;
 }
 
-// --- Stage1: find X-corner (top half first) ---
-function stage1FindXCorner(){
-  const rs = getRsSize();
-  if (!rs.w || !rs.h || !tplXCorner) return null;
+// ============================================================
+// Auto-find + learn
+// ============================================================
 
-  const halves = [
-    { name: "TOP",    y0: 0,                y1: Math.floor(rs.h / 2) },
-    { name: "BOTTOM", y0: Math.floor(rs.h / 2), y1: rs.h }
-  ];
-
-  let best = { score: 0, absX: 0, absY: 0, half: "TOP" };
-
-  for (const half of halves) {
-    let tileIndex = 0;
-
-    for (let ty = half.y0; ty < half.y1; ty += STAGE1.tileH) {
-      for (let tx = 0; tx < rs.w; tx += STAGE1.tileW) {
-        tileIndex++;
-
-        const w = Math.min(STAGE1.tileW, rs.w - tx);
-        const h = Math.min(STAGE1.tileH, half.y1 - ty);
-
-        const cap = captureRect({ x: tx, y: ty, w, h });
-        if (!cap.img) continue;
-
-        const m = findInImage(cap.img, tplXCorner, {
-          tolerance: STAGE1.tolerance,
-          minScore: 0.01,
-          step: STAGE1.step,
-          ignoreAlphaBelow: 0,
-          acceptScore: 0
-        });
-
-        drawRegionPreview(
-          cap.img,
-          `STAGE1 ${half.name} tile#${tileIndex} (${tx},${ty}) best=${best.score.toFixed(2)} cur=${m.score.toFixed(2)}`,
-          m.ok ? { x:m.x, y:m.y } : null,
-          tplXCorner
-        );
-
-        if (m.score > best.score) {
-          best = { score: m.score, absX: tx + m.x, absY: ty + m.y, half: half.name };
-          if (best.score >= STAGE1.earlyScore) return best;
-        }
-      }
-    }
-
-    // prefer top if already acceptable
-    if (best.half === "TOP" && best.score >= STAGE1.minAccept) return best;
-  }
-
-  return best.score >= STAGE1.minAccept ? best : null;
-}
-
-// --- Optional fallback: hourglass seed -> local X-corner ---
-function stage1FindHourglass(){
-  if (!tplHourglass) return null;
-
-  const rs = getRsSize();
-  if (!rs.w || !rs.h) return null;
-
-  const halves = [
-    { name: "TOP",    y0: 0,                y1: Math.floor(rs.h / 2) },
-    { name: "BOTTOM", y0: Math.floor(rs.h / 2), y1: rs.h }
-  ];
-
-  // very forgiving; just a seed
-  const seedMin = 0.30;
-
-  let best = { score: 0, absX: 0, absY: 0, half: "TOP" };
-
-  for (const half of halves) {
-    let tileIndex = 0;
-
-    for (let ty = half.y0; ty < half.y1; ty += STAGE1.tileH) {
-      for (let tx = 0; tx < rs.w; tx += STAGE1.tileW) {
-        tileIndex++;
-
-        const w = Math.min(STAGE1.tileW, rs.w - tx);
-        const h = Math.min(STAGE1.tileH, half.y1 - ty);
-
-        const cap = captureRect({ x: tx, y: ty, w, h });
-        if (!cap.img) continue;
-
-        const m = findInImage(cap.img, tplHourglass, {
-          tolerance: 120,
-          minScore: 0.01,
-          step: 4,
-          ignoreAlphaBelow: 0,
-          acceptScore: 0
-        });
-
-        drawRegionPreview(
-          cap.img,
-          `SEED ${half.name} tile#${tileIndex} (${tx},${ty}) best=${best.score.toFixed(2)} cur=${m.score.toFixed(2)}`,
-          m.ok ? { x:m.x, y:m.y } : null,
-          tplHourglass
-        );
-
-        if (m.score > best.score) {
-          best = { score: m.score, absX: tx + m.x, absY: ty + m.y, half: half.name };
-        }
-      }
-    }
-
-    if (best.half === "TOP" && best.score >= seedMin) return best;
-  }
-
-  return best.score >= seedMin ? best : null;
-}
-
-function stage2FindXCornerNear(seedAbsX, seedAbsY){
-  const rs = getRsSize();
-  if (!rs.w || !rs.h || !tplXCorner) return null;
-
-  let x = Math.floor(seedAbsX - STAGE2.localW / 2);
-  let y = Math.floor(seedAbsY - STAGE2.localH / 2);
-  x = clamp(x, 0, rs.w - 1);
-  y = clamp(y, 0, rs.h - 1);
-
-  const w = clamp(STAGE2.localW, 1, rs.w - x);
-  const h = clamp(STAGE2.localH, 1, rs.h - y);
-
-  const cap = captureRect({ x, y, w, h });
-  if (!cap.img) return null;
-
-  const m = findInImage(cap.img, tplXCorner, {
-    tolerance: STAGE2.tolerance,
-    minScore: 0.01,
-    step: STAGE2.step,
-    ignoreAlphaBelow: 0,
-    acceptScore: STAGE2.minAccept
-  });
-
-  drawRegionPreview(cap.img, "STAGE2 local (x_corner)", m.ok ? { x:m.x, y:m.y } : null, tplXCorner);
-
-  if (!m.ok) return null;
-
-  return { absX: cap.rect.x + m.x, absY: cap.rect.y + m.y, score: m.score };
-}
-
-// --- Main auto-find loop ---
-function runAutoFindOnce(){
+function autoFindAndLearnOnce(){
   if (!running) return;
 
+  const rs = getRsSize();
+  if (!rs.w || !rs.h) {
+    setStatus("No RS size");
+    return;
+  }
+
   setMode("Running");
-  setStatus("Auto-finding (stage 1)…");
+  setStatus("Auto-finding…");
   setLock("none");
   setProgress("—");
 
-  schedule(0, () => {
-    if (!running) return;
+  // Capture full RS (if this is too heavy for some users, we can tile it later)
+  const full = captureRegion(0, 0, rs.w, rs.h);
+  if (!full) {
+    setStatus("Capture failed");
+    dbg(JSON.stringify({ capture: "null", diag: window.progflashCaptureDiag || null }, null, 2));
+    schedule(600, autoFindAndLearnOnce);
+    return;
+  }
 
-    // Primary: direct x_corner scan (best universal option)
-    const s1 = stage1FindXCorner();
-    if (s1) {
-      saveUserLockAnchorFromXCorner(s1.absX, s1.absY);
-      setLockedAt(s1.absX, s1.absY, `Locked via X-corner (score ${s1.score.toFixed(2)}).`);
-      return;
-    }
+  // 1) Find CANCEL area
+  const cancel = findCancelCandidate(full);
+  if (!cancel) {
+    drawRegionPreview(full, "AUTO-FIND: no CANCEL cluster yet (retrying)…", null);
+    dbg(JSON.stringify({ stage: "cancel", ok: false, note: "retry in 600ms" }, null, 2));
+    schedule(600, autoFindAndLearnOnce);
+    return;
+  }
 
-    // Optional fallback: if hourglass exists, seed then local refine
-    const seed = stage1FindHourglass();
-    if (seed) {
-      setStatus(`Seed found (score ${seed.score.toFixed(2)}). Refining…`);
-      const s2 = stage2FindXCornerNear(seed.absX, seed.absY);
-      if (s2) {
-        saveUserLockAnchorFromXCorner(s2.absX, s2.absY);
-        setLockedAt(s2.absX, s2.absY, `Locked via seed→x_corner (score ${s2.score.toFixed(2)}).`);
-        return;
-      }
-    }
+  drawRegionPreview(full, `AUTO-FIND: cancelScore=${cancel.score.toFixed(3)} (${cancel.half})`, { ...cancel.box, color: "orange" });
 
-    setStatus("Auto-find: not found yet (retrying)...");
-    dbg(JSON.stringify({ stage1: "fail", note: "Will retry in 600ms" }, null, 2));
-    schedule(600, runAutoFindOnce);
-  });
+  // 2) Find red X corner near it
+  const xCorner = findRedXNear(full, cancel);
+  if (!xCorner) {
+    dbg(JSON.stringify({ stage: "xcorner", ok: false, cancel }, null, 2));
+    schedule(400, autoFindAndLearnOnce);
+    return;
+  }
+
+  // Show x-corner search box
+  drawRegionPreview(full, `AUTO-FIND: found redX density=${xCorner.density.toFixed(2)}`, { ...xCorner.searchBox, color: "deepskyblue" });
+
+  // 3) Learn anchor patch around x-corner and save it
+  const learned = learnAnchorAt(full, xCorner);
+
+  // 4) Save lock position at the x-corner coordinate and STOP scanning
+  setLockedAt(xCorner.x, xCorner.y, `Learned anchor ${learned.w}x${learned.h} at (${learned.ax},${learned.ay}).`);
+
+  // Also show learned anchor patch in preview for sanity (optional)
+  const patch = captureRegion(learned.ax, learned.ay, learned.w, learned.h);
+  if (patch) drawRegionPreview(patch, "LEARNED ANCHOR PATCH (saved)", { x: learned.dx-6, y: learned.dy-6, w: 12, h: 12, color: "lime" });
 }
 
-// --- Controls ---
+// ============================================================
+// Controls
+// ============================================================
+
 async function start(){
   if (!window.alt1) { setStatus("Alt1 missing"); dbg("Open inside Alt1 Toolkit."); return; }
   if (!alt1.permissionPixel) { setStatus("No pixel permission"); dbg("Enable Alt1 pixel permission."); return; }
-  if (typeof captureRegion !== "function" || typeof findAnchor !== "function" || typeof loadImage !== "function") {
+  if (typeof captureRegion !== "function" || typeof findAnchor !== "function") {
     setStatus("matcher.js not ready");
-    dbg(JSON.stringify({ captureRegion: typeof captureRegion, findAnchor: typeof findAnchor, loadImage: typeof loadImage }, null, 2));
+    dbg(JSON.stringify({ captureRegion: typeof captureRegion, findAnchor: typeof findAnchor }, null, 2));
     return;
   }
 
   running = true;
-  locked = false;
 
   setMode("Running");
-  setStatus("Loading templates…");
+  setStatus("Checking learned anchor…");
 
-  if (!tplXCorner) {
-    const { xc, hg } = await loadTemplates();
-    if (!xc) {
-      setStatus("Missing x_corner.png");
-      dbg(JSON.stringify({
-        error: "Template missing",
-        need: ["img/x_corner.png (required)"],
-        optional: ["img/hourglass_crop.png or img/hourglass_icon.png (optional seed)"]
-      }, null, 2));
-      running = false;
-      setMode("Not running");
-      return;
-    }
-    tplXCorner = forceOpaque(xc.img);
-    tplHourglass = hg ? forceOpaque(hg.img) : null;
+  // Fast path: verify once
+  if (verifySavedOnce()) return;
 
-    // safe debug output (no null crash)
-    dbg(JSON.stringify({
-      app: { version: APP_VERSION, build: BUILD_ID },
-      templates: {
-        xcorner: alphaStats(tplXCorner),
-        hourglass: tplHourglass ? alphaStats(tplHourglass) : null
-      },
-      note: "Templates loaded"
-    }, null, 2));
-  }
-
-  // If we have a saved lock, verify once and stop scanning immediately.
-  setStatus("Checking saved lock…");
-  if (lockPos && verifySavedLockOnce()) return;
-
-  // Otherwise auto-find
-  runAutoFindOnce();
+  // Otherwise, auto-find and learn
+  setStatus("Learning (first time) — show a progress window and wait…");
+  autoFindAndLearnOnce();
 }
 
 function stop(){
   running = false;
-  locked = false;
   stopLoop();
   setMode("Not running");
   setStatus("Idle");
@@ -572,22 +500,10 @@ function stop(){
   setProgress("—");
 }
 
-function clearLock(){
-  lockPos = null;
-  locked = false;
-  delKey(LS_LOCK);
-  delKey(LS_LOCK_ANCHOR);
-  updateSavedLockLabel();
-  setLock("none");
-  setProgress("—");
-  setStatus("Saved lock cleared");
-}
-
-// Buttons
 startBtn.onclick = () => start().catch(e => dbg(String(e)));
 stopBtn.onclick = () => stop();
-autoFindBtn.onclick = () => { clearLock(); start().catch(e => dbg(String(e))); };
-clearLockBtn.onclick = () => clearLock();
+autoFindBtn.onclick = () => { running = true; start().catch(e => dbg(String(e))); };
+clearLockBtn.onclick = () => { clearSaved(); setStatus("Cleared saved anchor/lock"); };
 testBtn.onclick = () => alert("flash test");
 
 // Init
@@ -597,10 +513,10 @@ testBtn.onclick = () => alert("flash test");
   setMode("Not running");
   setLock("none");
   setProgress("—");
-
   dbg(JSON.stringify({
     app: { version: APP_VERSION, build: BUILD_ID },
-    savedLock: lockPos,
-    note: "Start verifies saved lock once; if not found, auto-find runs until progress window appears, then stops scanning."
+    savedLock: loadJSON(LS_LOCK),
+    learned: loadJSON(LS_ANCHOR) ? "yes" : "no",
+    note: "Pivot: auto-detect CANCEL + redX, learn anchor patch, then verify-only."
   }, null, 2));
 })();
