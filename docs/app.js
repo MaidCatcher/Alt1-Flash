@@ -31,12 +31,12 @@
   const verEl = $("appVersion");
   const buildEl = $("appBuild");
   const loadedAtEl = $("loadedAt");
-  const scanAreaSelect = $("scanAreaSelect"); // optional
+  const scanAreaSelect = $("scanAreaSelect") || document.querySelector("select"); // optional (fallback to first select)
 
   const canvas = $("previewCanvas");
   const ctx = canvas ? canvas.getContext("2d", { willReadFrequently: true }) : null;
 
-  const APP_VERSION = "0.6.17";
+  const APP_VERSION = "0.6.18";
   const BUILD_ID = "final-" + Date.now();
 
   function setStatus(v) { if (statusEl) statusEl.textContent = v; }
@@ -608,10 +608,15 @@
           learnTripleAnchorFromDialog(c.absRect);
 
           // Lock uses top-left of Anchor A; we don't know A yet in fallback. Store dialog rect top-left for now.
-          save(LS_LOCK, { x: c.absRect.x, y: c.absRect.y });
-          updateSavedLockLabel();
-
-          setLock(`x=${c.absRect.x}, y=${c.absRect.y}`);
+          // Store lock as Anchor-A position (more stable + consistent with fast-lock)
+          {
+            const s = load(LS_MULTI);
+            const ax = s && typeof s.Ax === "number" ? (c.absRect.x + s.Ax) : c.absRect.x;
+            const ay = s && typeof s.Ay === "number" ? (c.absRect.y + s.Ay) : c.absRect.y;
+            save(LS_LOCK, { x: ax, y: ay });
+            updateSavedLockLabel();
+            setLock(`x=${ax}, y=${ay}`);
+          }
           setStatus(`Locked (fallback) pb=${conf.pb.toFixed(2)} moved=${conf.moved}`);
           setProgress("locked");
 
