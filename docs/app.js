@@ -163,22 +163,26 @@
   // ---------- Heuristic: red X cluster ----------
   const TILE = { w: 640, h: 360 };
   const RED_SCAN = {
-    step: 4,
-    neigh: 14,
-    minScore: 8
+    // smaller step = more sensitivity (slower). This runs only during Auto find.
+    step: 3,
+    // neighborhood size for clustering red-ish pixels (rough size of the X cluster)
+    neigh: 18,
+    // minimum clustered hits to consider a candidate
+    minScore: 5
   };
 
   // FIXED: function name is isRedish (no isRedX mismatch)
   function isRedish(r,g,b){
-    // gamma-tolerant "redness"
-    const maxGB = Math.max(g, b);
-    return (r - maxGB) > 45 && r > 80;
+    // Very tolerant "reddish" test that survives Alt1 gamma/tint differences.
+    // We key off *relative* redness rather than absolute RGB.
+    return (r > 60) && (r > g + 18) && (r > b + 18);
   }
 
   function findRedClusterInImage(img){
     const w = img.width, h = img.height;
     const data = img.data;
 
+    // Collect red-ish sample points
     const pts = [];
     for (let y = 0; y < h; y += RED_SCAN.step) {
       for (let x = 0; x < w; x += RED_SCAN.step) {
@@ -187,14 +191,17 @@
         if (isRedish(r,g,b)) pts.push({ x, y });
       }
     }
-    if (pts.length === 0) return null;
+
+    // No red-ish pixels at all
+    if (pts.length === 0) return { ok:false, score:0, x:0, y:0, pts:0 };
 
     const N = RED_SCAN.neigh;
-    let best = { score: 0, x: 0, y: 0 };
+    let best = { score: 0, x: pts[0].x, y: pts[0].y };
 
-    // Slight subsample for speed if tons of points
-    const candidates = pts.length > 900 ? pts.filter((_,i)=> i % 3 === 0) : pts;
+    // Subsample candidate centers if very dense (keeps CPU reasonable)
+    const candidates = pts.length > 1200 ? pts.filter((_,i)=> i % 4 === 0) : pts;
 
+    // Density scoring: count nearby points
     for (const p of candidates) {
       let score = 0;
       for (const q of pts) {
@@ -203,7 +210,7 @@
       if (score > best.score) best = { score, x: p.x, y: p.y };
     }
 
-    return best.score >= RED_SCAN.minScore ? best : null;
+    return { ok: best.score >= RED_SCAN.minScore, score: best.score, x: best.x, y: best.y, pts: pts.length };
   }
 
   function heuristicFindRedX(){
@@ -233,12 +240,12 @@
 
           drawRegionPreview(
             cap.img,
-            `HEUR ${half.name} tile#${tileIndex} (${tx},${ty}) ${cand ? `score=${cand.score}` : "score=0"}`,
-            cand ? { x: cand.x - 6, y: cand.y - 6, w: 12, h: 12 } : null,
-            cand ? "orange" : null
+            `HEUR ${half.name} tile#${tileIndex} (${tx},${ty}) pts=${cand.pts} score=${cand.score}`,
+            cand.ok ? { x: cand.x - 6, y: cand.y - 6, w: 12, h: 12 } : null,
+            cand.ok ? "orange" : null
           );
 
-          if (cand) {
+          if (cand.ok) {
             const hit = { absX: tx + cand.x, absY: ty + cand.y, score: cand.score, half: half.name };
             if (!globalBest || hit.score > globalBest.score) globalBest = hit;
             if (hit.score >= RED_SCAN.minScore + 10) return hit;
