@@ -208,10 +208,12 @@
     xMinFrac: 0.15,
     xMaxFrac: 0.85,
     // shortlist per pass
-    shortlistN: 6,
+    shortlistN: 4,
     // Early-exit: once best combined score passes this threshold,
     // stop scanning more tiles and start confirming immediately.
-    earlyExitComb: 0.92
+    earlyExitComb: 0.92,
+    // Only update preview every N tiles unless a new best candidate appears
+    previewEvery: 8
   };
 
   function getScanPreset() {
@@ -250,7 +252,31 @@
       { w: 450, h: 180 },
       { w: 430, h: 175 },
       { w: 410, h: 165 },
-      { w: 390, h: 160 },
+      { w: 390
+
+
+const COARSE = {
+  ds: 6,
+  edgeThr: 26,
+  scanStep: 6,
+  ring: 16,
+  sizes: [
+    { w: 440, h: 165 },
+    { w: 400, h: 150 },
+    { w: 360, h: 140 }
+  ],
+  // how many edge-only rectangles to keep before fine evaluation
+  keep: 10
+};
+
+const FINE = {
+  ds: 4,
+  scanStep: 3,
+  // search padding around coarse rect (pixels)
+  padPx: 48
+};
+
+, h: 160 },
       { w: 370, h: 150 },
       { w: 350, h: 140 }
     ],
@@ -544,37 +570,81 @@
   }
 
   function findTileCandidates(img) {
-    const iiObj = buildEdgeIntegral(img, RECT.ds, RECT.edgeThr);
-    const { W, H, ds } = iiObj;
+  // Coarse pass: edge-only scan (no pb/cancel/close) to get a handful of likely windows quickly
+  const coarseII = buildEdgeIntegral(img, COARSE.ds, COARSE.edgeThr);
+  const sizesC = COARSE.sizes.map(s => ({
+    w: Math.max(12, Math.floor(s.w / COARSE.ds)),
+    h: Math.max(10, Math.floor(s.h / COARSE.ds))
+  }));
+  const ringC = Math.max(2, Math.floor(COARSE.ring / COARSE.ds));
+  const keepC = COARSE.keep;
 
-    const sizes = RECT.sizes.map(s => ({
-      w: Math.max(14, Math.floor(s.w / ds)),
-      h: Math.max(12, Math.floor(s.h / ds))
-    }));
+  const coarse = [];
+  function pushCoarse(item) {
+    coarse.push(item);
+    coarse.sort((a, b) => b.rectScore - a.rectScore);
+    if (coarse.length > keepC) coarse.length = keepC;
+  }
 
-    // Keep a small list per tile
-    const tileKeep = 4;
-    const best = [];
+  for (const sz of sizesC) {
+    const ww = sz.w, hh = sz.h;
+    if (ww >= coarseII.W || hh >= coarseII.H) continue;
 
-    function pushCand(c) {
-      best.push(c);
-      best.sort((a, b) => b.comb - a.comb);
-      if (best.length > tileKeep) best.length = tileKeep;
+    for (let y = 0; y <= coarseII.H - hh; y += COARSE.scanStep) {
+      for (let x = 0; x <= coarseII.W - ww; x += COARSE.scanStep) {
+        const rectScore = scoreWindow(coarseII, x, y, ww, hh, ringC);
+        if (rectScore < RECT.minRectScore) continue;
+        pushCoarse({ rx: x, ry: y, rw: ww, rh: hh, rectScore });
+      }
     }
+  }
 
-    for (const sz of sizes) {
+  // Fine pass: full evaluation (pb + cancel/close) in a small neighborhood around coarse rectangles
+  const fineII = buildEdgeIntegral(img, RECT.ds, RECT.edgeThr);
+  const sizesF = RECT.sizes.map(s => ({
+    w: Math.max(12, Math.floor(s.w / RECT.ds)),
+    h: Math.max(10, Math.floor(s.h / RECT.ds))
+  }));
+
+  const tileKeep = 6;
+  const best = [];
+  function pushBest(c) {
+    best.push(c);
+    best.sort((a, b) => b.comb - a.comb);
+    if (best.length > tileKeep) best.length = tileKeep;
+  }
+
+  const pad = Math.max(12, Math.floor(FINE.padPx / RECT.ds));
+
+  for (const cc of coarse) {
+    const baseRectPx = { x: cc.rx * COARSE.ds, y: cc.ry * COARSE.ds, w: cc.rw * COARSE.ds, h: cc.rh * COARSE.ds };
+
+    // Convert neighborhood to fine (ds=4) coordinates
+    const minX = Math.max(0, Math.floor((baseRectPx.x - FINE.padPx) / RECT.ds));
+    const minY = Math.max(0, Math.floor((baseRectPx.y - FINE.padPx) / RECT.ds));
+    const maxX = Math.min(fineII.W - 1, Math.floor((baseRectPx.x + baseRectPx.w + FINE.padPx) / RECT.ds));
+    const maxY = Math.min(fineII.H - 1, Math.floor((baseRectPx.y + baseRectPx.h + FINE.padPx) / RECT.ds));
+
+    for (const sz of sizesF) {
       const ww = sz.w, hh = sz.h;
-      if (ww >= W || hh >= H) continue;
+      if (ww >= fineII.W || hh >= fineII.H) continue;
 
-      for (let y = 0; y <= H - hh; y += RECT.scanStep) {
-        for (let x = 0; x <= W - ww; x += RECT.scanStep) {
-          const c = evaluateRectCandidate(img, iiObj, x, y, ww, hh);
-          if (c) pushCand(c);
+      const xStart = Math.max(0, Math.min(minX, fineII.W - ww));
+      const yStart = Math.max(0, Math.min(minY, fineII.H - hh));
+      const xEnd = Math.max(0, Math.min(maxX, fineII.W - ww));
+      const yEnd = Math.max(0, Math.min(maxY, fineII.H - hh));
+
+      for (let y = yStart; y <= yEnd; y += RECT.scanStep) {
+        for (let x = xStart; x <= xEnd; x += RECT.scanStep) {
+          const c = evaluateRectCandidate(img, fineII, x, y, ww, hh);
+          if (c) pushBest(c);
         }
       }
     }
-    return best;
   }
+
+  return best;
+}
 
   // ---------- Scan pass (incremental tiles) ----------
   let scan = null;
@@ -661,21 +731,26 @@
       scan.earlyExit = { tile: scan.tileIndex, comb: bestNow.comb };
     }
 
-    // Preview best candidate so far
-    const best = scan.cands[0];
-    if (best) {
-      drawRegionPreview(
-        cap.img,
-        `SCAN tile#${scan.tileIndex} best comb=${best.comb.toFixed(3)} pb=${best.pbScore.toFixed(3)} cancel=${best.cancelOk ? best.cancelScore.toFixed(2) : "no"} close=${best.closeOk ? best.closeScore.toFixed(2) : "no"}`,
-        // show best candidate if it's within this tile; else show none
-        (best.absRect.x >= tx && best.absRect.x < tx + w && best.absRect.y >= ty && best.absRect.y < ty + h)
-          ? { x: best.absRect.x - tx, y: best.absRect.y - ty, w: best.absRect.w, h: best.absRect.h }
-          : null,
-        "orange"
-      );
-    } else {
-      drawRegionPreview(cap.img, `SCAN tile#${scan.tileIndex} (no candidates)`, null);
-    }
+    
+// Preview (throttled): update every N tiles, or when a new best appears, or on early-exit
+const best = scan.cands[0] || null;
+const newBest = best && (scan.lastPreviewComb == null || best.comb > scan.lastPreviewComb + 0.02);
+const periodic = (scan.tileIndex % SCAN.previewEvery) === 0;
+const must = !!scan.earlyExit;
+
+if (best && (periodic || newBest || must)) {
+  scan.lastPreviewComb = best.comb;
+  drawRegionPreview(
+    cap.img,
+    `SCAN tile#${scan.tileIndex} best comb=${best.comb.toFixed(3)} rect=${best.rectScore.toFixed(3)} pb=${best.pbScore.toFixed(3)} cancel=${best.cancelOk ? best.cancelScore.toFixed(2) : "no"} close=${best.closeOk ? best.closeScore.toFixed(2) : "no"}`,
+    (best.absRect.x >= tx && best.absRect.x < tx + w && best.absRect.y >= ty && best.absRect.y < ty + h)
+      ? { x: best.absRect.x - tx, y: best.absRect.y - ty, w: best.absRect.w, h: best.absRect.h }
+      : null,
+    "orange"
+  );
+} else if (!best && periodic) {
+  drawRegionPreview(cap.img, `SCAN tile#${scan.tileIndex} (no candidates)`, null);
+}
 
     setProgress(`tile ${scan.tileIndex}`);
 
