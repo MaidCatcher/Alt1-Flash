@@ -1,516 +1,433 @@
-// ProgFlash app.js — Pivot to adaptive anchor learning (no shipped templates)
+// ProgFlash app.js — Adaptive (learned) anchor, no shipped templates.
+// Auto-find learns an anchor once (from the user's own pixels), saves it, then stops scanning.
+// Start: verifies saved anchor once; if not found, runs Auto find loop.
+// Auto find: runs heuristic scan (red X cluster) + learns anchor.
+// Clear lock: deletes saved lock+anchor.
 //
-// Goal:
-// - Fully automatic: detect progress window by heuristics (CANCEL orange + red X corner)
-// - Learn a user-specific anchor patch once and store it
-// - After locked once: stop scanning
-// - Start later: verify saved anchor once; if ok stop; else re-find
-//
-// Requires matcher.js exports: captureRegion(), findAnchor()
-// (We use findAnchor only for verification against the learned patch)
+// Requires matcher.js to provide: captureRegion(x,y,w,h) and findAnchor(hay, needle, opts)
 
-const statusEl = document.getElementById("status");
-const modeEl   = document.getElementById("mode");
-const lockEl   = document.getElementById("lock");
-const progEl   = document.getElementById("progress");
-const dbgEl    = document.getElementById("debugBox");
+(function () {
+  // ---------- UI ----------
+  const statusEl = document.getElementById("status");
+  const modeEl   = document.getElementById("mode");
+  const lockEl   = document.getElementById("lock");
+  const progEl   = document.getElementById("progress");
+  const dbgEl    = document.getElementById("debugBox");
 
-const startBtn = document.getElementById("startBtn");
-const stopBtn  = document.getElementById("stopBtn");
-const autoFindBtn = document.getElementById("autoFindBtn");
-const clearLockBtn = document.getElementById("clearLockBtn");
-const testBtn  = document.getElementById("testFlashBtn");
+  const startBtn = document.getElementById("startBtn");
+  const stopBtn  = document.getElementById("stopBtn");
+  const autoFindBtn = document.getElementById("autoFindBtn");
+  const clearLockBtn = document.getElementById("clearLockBtn");
+  const testBtn  = document.getElementById("testFlashBtn");
 
-const savedLockEl = document.getElementById("savedLock");
+  const savedLockEl = document.getElementById("savedLock");
 
-const canvas = document.getElementById("previewCanvas");
-const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const canvas = document.getElementById("previewCanvas");
+  const ctx = canvas ? canvas.getContext("2d", { willReadFrequently: true }) : null;
 
-function setStatus(v){ statusEl.textContent = v; }
-function setMode(v){ modeEl.textContent = v; }
-function setLock(v){ lockEl.textContent = v; }
-function setProgress(v){ progEl.textContent = v; }
-function dbg(v){ dbgEl.textContent = String(v); }
+  function setStatus(v){ if (statusEl) statusEl.textContent = v; }
+  function setMode(v){ if (modeEl) modeEl.textContent = v; }
+  function setLock(v){ if (lockEl) lockEl.textContent = v; }
+  function setProgress(v){ if (progEl) progEl.textContent = v; }
+  function dbg(v){ if (dbgEl) dbgEl.textContent = String(v); }
 
-const APP_VERSION = window.APP_VERSION || "unknown";
-const BUILD_ID = window.BUILD_ID || ("build-" + Date.now());
+  // ---------- Version ----------
+  const APP_VERSION = window.APP_VERSION || "adaptive";
+  const BUILD_ID = window.BUILD_ID || ("build-" + Date.now());
 
-const LS_LOCK = "progflash.lockPos";            // {x,y}
-const LS_ANCHOR = "progflash.learnedAnchor";    // {w,h,rgbaBase64,dx,dy} dx/dy is where x-corner sits within anchor
-const LS_NOTE = "progflash.note";
+  // ---------- Storage ----------
+  const LS_LOCK_POS = "progflash.lockPos";        // {x,y} (approx X location)
+  const LS_ANCHOR   = "progflash.learnedAnchor";  // {w,h,rgbaBase64,dx,dy}
 
-function loadJSON(key){
-  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : null; } catch { return null; }
-}
-function saveJSON(key, obj){
-  try { localStorage.setItem(key, JSON.stringify(obj)); } catch {}
-}
-function delKey(key){
-  try { localStorage.removeItem(key); } catch {}
-}
-function clamp(n,a,b){ return Math.max(a, Math.min(b,n)); }
-
-function updateSavedLockLabel(){
-  const lp = loadJSON(LS_LOCK);
-  savedLockEl.textContent = lp ? `x=${lp.x},y=${lp.y}` : "none";
-}
-
-function getRsSize(){
-  return { w: alt1.rsWidth || 0, h: alt1.rsHeight || 0 };
-}
-
-function captureRect(r){
-  const img = captureRegion(r.x, r.y, r.w, r.h);
-  return { rect: r, img };
-}
-
-// --- Preview drawing ---
-function drawRegionPreview(regionImg, label, box){
-  if (!regionImg) return;
-
-  const srcW = regionImg.width, srcH = regionImg.height;
-  const imageData = new ImageData(new Uint8ClampedArray(regionImg.data), srcW, srcH);
-
-  const cw = canvas.width, ch = canvas.height;
-  const scale = Math.min(cw / srcW, ch / srcH);
-  const drawW = Math.floor(srcW * scale);
-  const drawH = Math.floor(srcH * scale);
-  const offX = Math.floor((cw - drawW) / 2);
-  const offY = Math.floor((ch - drawH) / 2);
-
-  ctx.clearRect(0,0,cw,ch);
-
-  const tmp = document.createElement("canvas");
-  tmp.width = srcW; tmp.height = srcH;
-  const tctx = tmp.getContext("2d", { willReadFrequently: true });
-  tctx.putImageData(imageData, 0, 0);
-
-  ctx.drawImage(tmp, 0, 0, srcW, srcH, offX, offY, drawW, drawH);
-
-  // label
-  ctx.fillStyle = "rgba(0,0,0,0.6)";
-  ctx.fillRect(6,6,Math.min(cw-12, 520),20);
-  ctx.fillStyle = "white";
-  ctx.font = "12px Arial";
-  ctx.fillText(label, 12, 21);
-
-  if (box) {
-    const fx = offX + Math.floor(box.x * scale);
-    const fy = offY + Math.floor(box.y * scale);
-    const fw = Math.floor(box.w * scale);
-    const fh = Math.floor(box.h * scale);
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = box.color || "deepskyblue";
-    ctx.strokeRect(fx, fy, fw, fh);
+  function loadJSON(key){
+    try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : null; } catch { return null; }
   }
-}
+  function saveJSON(key, obj){
+    try { localStorage.setItem(key, JSON.stringify(obj)); } catch {}
+  }
+  function delKey(key){
+    try { localStorage.removeItem(key); } catch {}
+  }
+  function clamp(n,a,b){ return Math.max(a, Math.min(b,n)); }
 
-// --- Learned anchor representation for findAnchor() ---
-function bytesToBase64(bytes){
-  let s = "";
-  for (let i=0;i<bytes.length;i++) s += String.fromCharCode(bytes[i]);
-  return btoa(s);
-}
-function base64ToBytes(b64){
-  const bin = atob(b64);
-  const out = new Uint8ClampedArray(bin.length);
-  for (let i=0;i<bin.length;i++) out[i] = bin.charCodeAt(i) & 255;
-  return out;
-}
-function rgba(r,g,b,a){ return (r&255)|((g&255)<<8)|((b&255)<<16)|((a&255)<<24); }
-function makeNeedleFromRGBA(w,h,bytes){
-  return {
-    width: w,
-    height: h,
-    data: bytes,
-    getPixel(x,y){
-      if (x < 0 || y < 0 || x >= w || y >= h) return 0;
-      const i = (y*w + x) * 4;
-      return rgba(bytes[i], bytes[i+1], bytes[i+2], bytes[i+3]);
+  function updateSavedLockLabel(){
+    if (!savedLockEl) return;
+    const lp = loadJSON(LS_LOCK_POS);
+    savedLockEl.textContent = lp ? `x=${lp.x},y=${lp.y}` : "none";
+  }
+
+  // ---------- Capture helpers ----------
+  function getRsSize(){
+    return { w: (window.alt1 && alt1.rsWidth) ? alt1.rsWidth : 0, h: (window.alt1 && alt1.rsHeight) ? alt1.rsHeight : 0 };
+  }
+
+  function captureRect(r){
+    const img = captureRegion(r.x, r.y, r.w, r.h);
+    return { rect: r, img };
+  }
+
+  // ---------- Preview ----------
+  function drawRegionPreview(regionImg, label, rect /* relative */, strokeStyle){
+    if (!ctx || !canvas || !regionImg) return;
+
+    const srcW = regionImg.width, srcH = regionImg.height;
+    const imageData = new ImageData(new Uint8ClampedArray(regionImg.data), srcW, srcH);
+
+    const cw = canvas.width, ch = canvas.height;
+    const scale = Math.min(cw / srcW, ch / srcH);
+    const drawW = Math.floor(srcW * scale);
+    const drawH = Math.floor(srcH * scale);
+    const offX = Math.floor((cw - drawW) / 2);
+    const offY = Math.floor((ch - drawH) / 2);
+
+    ctx.clearRect(0,0,cw,ch);
+
+    const tmp = document.createElement("canvas");
+    tmp.width = srcW; tmp.height = srcH;
+    const tctx = tmp.getContext("2d", { willReadFrequently: true });
+    tctx.putImageData(imageData, 0, 0);
+
+    ctx.drawImage(tmp, 0, 0, srcW, srcH, offX, offY, drawW, drawH);
+
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(6,6,Math.min(cw-12, 520),20);
+    ctx.fillStyle = "white";
+    ctx.font = "12px Arial";
+    ctx.fillText(label, 12, 21);
+
+    if (rect) {
+      const fx = offX + Math.floor(rect.x * scale);
+      const fy = offY + Math.floor(rect.y * scale);
+      const fw = Math.floor(rect.w * scale);
+      const fh = Math.floor(rect.h * scale);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = strokeStyle || "deepskyblue";
+      ctx.strokeRect(fx, fy, fw, fh);
     }
+  }
+
+  // ---------- Learned anchor helpers ----------
+  function bytesToBase64(bytes){
+    let s = "";
+    for (let i=0;i<bytes.length;i++) s += String.fromCharCode(bytes[i]);
+    return btoa(s);
+  }
+  function base64ToBytes(b64){
+    const bin = atob(b64);
+    const out = new Uint8ClampedArray(bin.length);
+    for (let i=0;i<bin.length;i++) out[i] = bin.charCodeAt(i) & 255;
+    return out;
+  }
+  function rgba(r,g,b,a){ return (r&255) | ((g&255)<<8) | ((b&255)<<16) | ((a&255)<<24); }
+  function makeNeedleFromRGBA(w,h,bytes){
+    return {
+      width: w,
+      height: h,
+      data: bytes,
+      getPixel(x,y){
+        if (x < 0 || y < 0 || x >= w || y >= h) return 0;
+        const i = (y*w + x) * 4;
+        return rgba(bytes[i], bytes[i+1], bytes[i+2], bytes[i+3]);
+      }
+    };
+  }
+
+  function cropRGBAFromCapture(img, x, y, w, h){
+    const bytes = new Uint8ClampedArray(w*h*4);
+    let idx = 0;
+    for (let yy=0; yy<h; yy++){
+      for (let xx=0; xx<w; xx++){
+        const si = ((y+yy) * img.width + (x+xx)) * 4;
+        bytes[idx++] = img.data[si+0];
+        bytes[idx++] = img.data[si+1];
+        bytes[idx++] = img.data[si+2];
+        bytes[idx++] = img.data[si+3];
+      }
+    }
+    return bytes;
+  }
+
+  // ---------- Loop ----------
+  let running = false;
+  let loopHandle = null;
+
+  function stopLoop(){
+    if (loopHandle) clearTimeout(loopHandle);
+    loopHandle = null;
+  }
+  function schedule(ms, fn){
+    stopLoop();
+    loopHandle = setTimeout(fn, ms);
+  }
+
+  // ---------- Heuristic: red X cluster ----------
+  const TILE = { w: 640, h: 360 };
+  const RED_SCAN = {
+    step: 4,
+    neigh: 14,
+    minScore: 8
   };
-}
-function cropRGBA(img, x, y, w, h){
-  const out = new Uint8ClampedArray(w*h*4);
-  let k = 0;
-  for (let yy=0; yy<h; yy++){
-    for (let xx=0; xx<w; xx++){
-      const si = ((y+yy) * img.width + (x+xx)) * 4;
-      out[k++] = img.data[si+0];
-      out[k++] = img.data[si+1];
-      out[k++] = img.data[si+2];
-      out[k++] = img.data[si+3];
-    }
+
+  // FIXED: function name is isRedish (no isRedX mismatch)
+  function isRedish(r,g,b){
+    // gamma-tolerant "redness"
+    const maxGB = Math.max(g, b);
+    return (r - maxGB) > 45 && r > 80;
   }
-  // Force opaque so matcher never skips pixels due to alpha
-  for (let i=0;i<out.length;i+=4) out[i+3] = 255;
-  return out;
-}
 
-// --- Loop control ---
-let running = false;
-let loopHandle = null;
+  function findRedClusterInImage(img){
+    const w = img.width, h = img.height;
+    const data = img.data;
 
-function stopLoop(){
-  if (loopHandle) clearTimeout(loopHandle);
-  loopHandle = null;
-}
-function schedule(ms, fn){
-  stopLoop();
-  loopHandle = setTimeout(fn, ms);
-}
+    const pts = [];
+    for (let y = 0; y < h; y += RED_SCAN.step) {
+      for (let x = 0; x < w; x += RED_SCAN.step) {
+        const i = (y * w + x) * 4;
+        const r = data[i+0], g = data[i+1], b = data[i+2];
+        if (isRedish(r,g,b)) pts.push({ x, y });
+      }
+    }
+    if (pts.length === 0) return null;
 
-// ============================================================
-// Heuristic Finder (no templates)
-// ============================================================
+    const N = RED_SCAN.neigh;
+    let best = { score: 0, x: 0, y: 0 };
 
-// Color tests (tuned for RS UI style; forgiving)
-function isOrangeCancel(r,g,b){
-  // orange-ish / amber
-  return (r >= 150 && r <= 255) && (g >= 70 && g <= 170) && (b >= 0 && b <= 120) && (r > g) && (g > b);
-}
-function isRedish(r,g,b){
-  // gamma-tolerant "redness": red significantly bigger than green/blue
-  const maxGB = Math.max(g, b);
-  return (r - maxGB) > 55 && r > 90;
-}
+    // Slight subsample for speed if tons of points
+    const candidates = pts.length > 900 ? pts.filter((_,i)=> i % 3 === 0) : pts;
 
-}
+    for (const p of candidates) {
+      let score = 0;
+      for (const q of pts) {
+        if (Math.abs(q.x - p.x) <= N && Math.abs(q.y - p.y) <= N) score++;
+      }
+      if (score > best.score) best = { score, x: p.x, y: p.y };
+    }
 
-// Downsample scan for orange density
-function findCancelCandidate(fullImg){
-  const rsW = fullImg.width, rsH = fullImg.height;
+    return best.score >= RED_SCAN.minScore ? best : null;
+  }
 
-  // Prefer top half first
-  const halves = [
-    { name: "TOP", y0: 0, y1: Math.floor(rsH/2) },
-    { name: "BOTTOM", y0: Math.floor(rsH/2), y1: rsH }
-  ];
+  function heuristicFindRedX(){
+    const rs = getRsSize();
+    if (!rs.w || !rs.h) return null;
 
-  // Step controls speed vs detection
-  const step = 6; // sampling stride
-  // Window size for scanning the CANCEL button region (approx)
-  const winW = 180;
-  const winH = 70;
+    const halves = [
+      { name: "TOP",    y0: 0,                y1: Math.floor(rs.h / 2) },
+      { name: "BOTTOM", y0: Math.floor(rs.h / 2), y1: rs.h }
+    ];
 
-  let best = { score: 0, x: 0, y: 0, half: "TOP" };
+    let globalBest = null;
 
-  // We score a window by counting orange hits in that area
-  // To keep it simple/fast, we do sparse sampling inside each window.
-  const innerStep = 6;
+    for (const half of halves) {
+      let tileIndex = 0;
+      for (let ty = half.y0; ty < half.y1; ty += TILE.h) {
+        for (let tx = 0; tx < rs.w; tx += TILE.w) {
+          tileIndex++;
 
-  for (const half of halves) {
-    for (let y = half.y0; y < half.y1 - winH; y += winH) {
-      for (let x = 0; x < rsW - winW; x += winW) {
+          const w = Math.min(TILE.w, rs.w - tx);
+          const h = Math.min(TILE.h, half.y1 - ty);
 
-        let hits = 0;
-        let total = 0;
+          const cap = captureRect({ x: tx, y: ty, w, h });
+          if (!cap.img) continue;
 
-        for (let yy = 0; yy < winH; yy += innerStep) {
-          const py = y + yy;
-          for (let xx = 0; xx < winW; xx += innerStep) {
-            const px = x + xx;
-            const i = (py * rsW + px) * 4;
-            const r = fullImg.data[i], g = fullImg.data[i+1], b = fullImg.data[i+2];
-            total++;
-            if (isOrangeCancel(r,g,b)) hits++;
+          const cand = findRedClusterInImage(cap.img);
+
+          drawRegionPreview(
+            cap.img,
+            `HEUR ${half.name} tile#${tileIndex} (${tx},${ty}) ${cand ? `score=${cand.score}` : "score=0"}`,
+            cand ? { x: cand.x - 6, y: cand.y - 6, w: 12, h: 12 } : null,
+            cand ? "orange" : null
+          );
+
+          if (cand) {
+            const hit = { absX: tx + cand.x, absY: ty + cand.y, score: cand.score, half: half.name };
+            if (!globalBest || hit.score > globalBest.score) globalBest = hit;
+            if (hit.score >= RED_SCAN.minScore + 10) return hit;
           }
         }
-
-        const score = total ? (hits / total) : 0;
-        if (score > best.score) best = { score, x, y, half: half.name };
       }
+      if (globalBest && globalBest.half === "TOP") return globalBest;
     }
 
-    // if top is decent, don’t bother bottom
-    if (best.half === "TOP" && best.score >= 0.06) break;
+    return globalBest;
   }
 
-  // Threshold: needs some orange concentration
-  if (best.score < 0.04) return null;
+  // ---------- Learn anchor ----------
+  function learnAnchorFromRedX(xAbs, yAbs){
+    const rs = getRsSize();
+    if (!rs.w || !rs.h) return false;
 
-  return {
-    half: best.half,
-    // center-ish of the window we scored
-    cx: best.x + Math.floor(winW/2),
-    cy: best.y + Math.floor(winH/2),
-    score: best.score,
-    box: { x: best.x, y: best.y, w: winW, h: winH }
-  };
-}
+    // Capture a generous stable chunk around the close button area.
+    const dx = 30;
+    const dy = 30;
+    const aw = 360;
+    const ah = 220;
 
-// Given a cancel candidate, search nearby for red X corner
-function findRedXNear(fullImg, seed){
-  const rsW = fullImg.width, rsH = fullImg.height;
+    let ax = xAbs - dx;
+    let ay = yAbs - dy;
+    ax = clamp(ax, 0, rs.w - 1);
+    ay = clamp(ay, 0, rs.h - 1);
 
-  // Search region above and to the right of the cancel area (progress window top-right)
-  const rx = clamp(seed.cx - 250, 0, rsW-1);
-  const ry = clamp(seed.cy - 260, 0, rsH-1);
-  const rw = clamp(520, 1, rsW - rx);
-  const rh = clamp(320, 1, rsH - ry);
+    const w = clamp(aw, 1, rs.w - ax);
+    const h = clamp(ah, 1, rs.h - ay);
 
-  // Find the topmost-rightmost red-ish pixel cluster
-  // We’ll pick the best candidate with a small neighborhood density.
-  const step = 2;
+    const cap = captureRect({ x: ax, y: ay, w, h });
+    if (!cap.img) return false;
 
-  let best = null;
-
-  for (let y = 0; y < rh; y += step) {
-    for (let x = 0; x < rw; x += step) {
-      const i = ((ry + y) * rsW + (rx + x)) * 4;
-      const r = fullImg.data[i], g = fullImg.data[i+1], b = fullImg.data[i+2];
-
-      if (!isRedX(r,g,b)) continue;
-
-      // neighborhood density check (avoid random red particles)
-      let redHits = 0;
-      let n = 0;
-      for (let yy = -6; yy <= 6; yy += 2) {
-        const py = y + yy;
-        if (py < 0 || py >= rh) continue;
-        for (let xx = -6; xx <= 6; xx += 2) {
-          const px = x + xx;
-          if (px < 0 || px >= rw) continue;
-          const ii = ((ry + py) * rsW + (rx + px)) * 4;
-          const rr = fullImg.data[ii], gg = fullImg.data[ii+1], bb = fullImg.data[ii+2];
-          n++;
-          if (isRedX(rr,gg,bb)) redHits++;
-        }
-      }
-
-      const density = n ? (redHits / n) : 0;
-      if (density < 0.25) continue;
-
-      const cand = { x: rx + x, y: ry + y, density };
-
-      // Prefer smaller y (top) and larger x (right)
-      if (!best) best = cand;
-      else {
-        if (cand.y < best.y - 3) best = cand;
-        else if (Math.abs(cand.y - best.y) <= 3 && cand.x > best.x) best = cand;
-        else if (cand.density > best.density + 0.10) best = cand;
-      }
-    }
+    const bytes = cropRGBAFromCapture(cap.img, 0, 0, w, h);
+    saveJSON(LS_ANCHOR, { w, h, rgbaBase64: bytesToBase64(bytes), dx, dy });
+    saveJSON(LS_LOCK_POS, { x: xAbs, y: yAbs });
+    updateSavedLockLabel();
+    return true;
   }
 
-  if (!best) return null;
-
-  return {
-    x: best.x,
-    y: best.y,
-    density: best.density,
-    searchBox: { x: rx, y: ry, w: rw, h: rh }
-  };
-}
-
-// Learn and save anchor patch around the x-corner
-function learnAnchorAt(fullImg, xCorner){
-  const rsW = fullImg.width, rsH = fullImg.height;
-
-  // Anchor patch size: big enough to be unique, small enough to verify fast
-  const aw = 220;
-  const ah = 140;
-
-  // Place x-corner near the top-right of anchor patch but include some left/below texture
-  const dx = 200; // xCorner is dx pixels from anchor left
-  const dy = 18;  // yCorner is dy pixels from anchor top
-
-  let ax = clamp(xCorner.x - dx, 0, rsW-1);
-  let ay = clamp(xCorner.y - dy, 0, rsH-1);
-  const w = clamp(aw, 1, rsW - ax);
-  const h = clamp(ah, 1, rsH - ay);
-
-  const bytes = cropRGBA(fullImg, ax, ay, w, h);
-
-  saveJSON(LS_ANCHOR, {
-    w, h,
-    rgbaBase64: bytesToBase64(bytes),
-    dx, dy
-  });
-
-  return { ax, ay, w, h, dx, dy };
-}
-
-// ============================================================
-// Lock / Verify flow
-// ============================================================
-
-function setLockedAt(x, y, note){
-  saveJSON(LS_LOCK, { x, y });
-  updateSavedLockLabel();
-
-  setStatus("Locked (scanning stopped)");
-  setMode("Running");
-  setLock(`x=${x}, y=${y}`);
-  setProgress("locked");
-
-  dbg(JSON.stringify({
-    app: { version: APP_VERSION, build: BUILD_ID },
-    locked: true,
-    lockPos: { x, y },
-    note
-  }, null, 2));
-
-  stopLoop();
-}
-
-function clearSaved(){
-  delKey(LS_LOCK);
-  delKey(LS_ANCHOR);
-  delKey(LS_NOTE);
-  updateSavedLockLabel();
-  setLock("none");
-  setProgress("—");
-}
-
-function verifySavedOnce(){
-  const lockPos = loadJSON(LS_LOCK);
-  const learned = loadJSON(LS_ANCHOR);
-  if (!lockPos || !learned) return false;
-
-  const rs = getRsSize();
-  if (!rs.w || !rs.h) return false;
-
-  const needle = makeNeedleFromRGBA(learned.w, learned.h, base64ToBytes(learned.rgbaBase64));
-
-  // Verify in a small region around saved lock
-  const pad = 260;
-
-  let rx = clamp(lockPos.x - pad, 0, rs.w-1);
-  let ry = clamp(lockPos.y - pad, 0, rs.h-1);
-  const rw = clamp(pad*2, 1, rs.w - rx);
-  const rh = clamp(pad*2, 1, rs.h - ry);
-
-  const cap = captureRect({ x: rx, y: ry, w: rw, h: rh });
-  if (!cap.img) return false;
-
-  const res = findAnchor(cap.img, needle, {
-    tolerance: 85,
-    minScore: 0.01,
+  // ---------- Verify anchor ----------
+  const VERIFY = {
+    pad: 320,
     step: 2,
-    ignoreAlphaBelow: 0
-  });
+    tolerance: 55,
+    minAccept: 0.72
+  };
 
-  const score = res?.score ?? 0;
-  const ok = !!(res?.ok && score >= 0.70);
+  function verifySavedAnchorOnce(){
+    const lockPos = loadJSON(LS_LOCK_POS);
+    const stored = loadJSON(LS_ANCHOR);
+    if (!lockPos || !stored) return false;
 
-  drawRegionPreview(cap.img, `VERIFY learned anchor score=${score.toFixed(2)}`, ok ? { x: res.x, y: res.y, w: needle.width, h: needle.height, color: "lime" } : null);
+    const rs = getRsSize();
+    if (!rs.w || !rs.h) return false;
 
-  if (!ok) return false;
+    const needle = makeNeedleFromRGBA(stored.w, stored.h, base64ToBytes(stored.rgbaBase64));
 
-  // Convert match back to x-corner coordinate
-  const foundAx = cap.rect.x + res.x;
-  const foundAy = cap.rect.y + res.y;
-  const xCornerX = foundAx + learned.dx;
-  const xCornerY = foundAy + learned.dy;
+    const pad = VERIFY.pad;
+    let rx = Math.floor(lockPos.x - pad);
+    let ry = Math.floor(lockPos.y - pad);
+    rx = clamp(rx, 0, rs.w - 1);
+    ry = clamp(ry, 0, rs.h - 1);
+    const rw = clamp(pad * 2, 1, rs.w - rx);
+    const rh = clamp(pad * 2, 1, rs.h - ry);
 
-  setLockedAt(xCornerX, xCornerY, "Verified learned anchor; scanning stopped.");
-  return true;
-}
+    const cap = captureRect({ x: rx, y: ry, w: rw, h: rh });
+    if (!cap.img) return false;
 
-// ============================================================
-// Auto-find + learn
-// ============================================================
+    const m = findAnchor(cap.img, needle, {
+      tolerance: VERIFY.tolerance,
+      minScore: 0.01,
+      step: VERIFY.step,
+      ignoreAlphaBelow: 0
+    });
 
-function autoFindAndLearnOnce(){
-  if (!running) return;
+    const ok = !!(m && m.ok && typeof m.score === "number" && m.score >= VERIFY.minAccept);
 
-  const rs = getRsSize();
-  if (!rs.w || !rs.h) {
-    setStatus("No RS size");
-    return;
+    drawRegionPreview(
+      cap.img,
+      `VERIFY score=${(m?.score ?? 0).toFixed(2)} ${ok ? "OK" : "MISS"}`,
+      ok ? { x: m.x, y: m.y, w: needle.width, h: needle.height } : null,
+      ok ? "lime" : "red"
+    );
+
+    if (!ok) return false;
+
+    const foundAnchorAbsX = cap.rect.x + m.x;
+    const foundAnchorAbsY = cap.rect.y + m.y;
+
+    const xCornerX = foundAnchorAbsX + stored.dx;
+    const xCornerY = foundAnchorAbsY + stored.dy;
+
+    // update lock
+    saveJSON(LS_LOCK_POS, { x: xCornerX, y: xCornerY });
+    updateSavedLockLabel();
+
+    setStatus("Locked (scanning stopped)");
+    setMode("Running");
+    setLock(`x=${xCornerX}, y=${xCornerY}`);
+    setProgress("locked");
+    dbg(JSON.stringify({ verify: { ok: true, score: m.score }, lockPos: { x: xCornerX, y: xCornerY } }, null, 2));
+
+    stopLoop();
+    return true;
   }
 
-  setMode("Running");
-  setStatus("Auto-finding…");
-  setLock("none");
-  setProgress("—");
+  // ---------- Main auto-find loop ----------
+  function runAutoFindLoop(){
+    if (!running) return;
 
-  // Capture full RS (if this is too heavy for some users, we can tile it later)
-  const full = captureRegion(0, 0, rs.w, rs.h);
-  if (!full) {
-    setStatus("Capture failed");
-    dbg(JSON.stringify({ capture: "null", diag: window.progflashCaptureDiag || null }, null, 2));
-    schedule(600, autoFindAndLearnOnce);
-    return;
+    setMode("Running");
+    setStatus("Auto-finding (red X heuristic)…");
+    setLock("none");
+    setProgress("—");
+
+    schedule(0, () => {
+      if (!running) return;
+
+      const hit = heuristicFindRedX();
+      if (!hit) {
+        setStatus("Auto-find: not found yet (retrying)...");
+        dbg(JSON.stringify({ heuristic: "fail", note: "Retry in 600ms" }, null, 2));
+        schedule(600, runAutoFindLoop);
+        return;
+      }
+
+      setStatus(`Heuristic hit (score ${hit.score}). Learning anchor…`);
+
+      const learned = learnAnchorFromRedX(hit.absX, hit.absY);
+      if (!learned) {
+        setStatus("Auto-find: capture failed (retrying)...");
+        schedule(600, runAutoFindLoop);
+        return;
+      }
+
+      setStatus("Verifying learned anchor…");
+      if (verifySavedAnchorOnce()) return;
+
+      setStatus("Learned anchor verify failed (retrying)...");
+      schedule(600, runAutoFindLoop);
+    });
   }
 
-  // 1) Find CANCEL area
-  const cancel = findCancelCandidate(full);
-  if (!cancel) {
-    drawRegionPreview(full, "AUTO-FIND: no CANCEL cluster yet (retrying)…", null);
-    dbg(JSON.stringify({ stage: "cancel", ok: false, note: "retry in 600ms" }, null, 2));
-    schedule(600, autoFindAndLearnOnce);
-    return;
+  // ---------- Controls ----------
+  async function start(){
+    if (!window.alt1) { setStatus("Alt1 missing"); dbg("Open inside Alt1 Toolkit."); return; }
+    if (!alt1.permissionPixel) { setStatus("No pixel permission"); dbg("Enable Alt1 pixel permission."); return; }
+    if (typeof captureRegion !== "function" || typeof findAnchor !== "function") {
+      setStatus("matcher.js not ready");
+      dbg(JSON.stringify({ captureRegion: typeof captureRegion, findAnchor: typeof findAnchor }, null, 2));
+      return;
+    }
+
+    running = true;
+
+    setStatus("Checking saved lock…");
+    if (verifySavedAnchorOnce()) return;
+
+    runAutoFindLoop();
   }
 
-  drawRegionPreview(full, `AUTO-FIND: cancelScore=${cancel.score.toFixed(3)} (${cancel.half})`, { ...cancel.box, color: "orange" });
-
-  // 2) Find red X corner near it
-  const xCorner = findRedXNear(full, cancel);
-  if (!xCorner) {
-    dbg(JSON.stringify({ stage: "xcorner", ok: false, cancel }, null, 2));
-    schedule(400, autoFindAndLearnOnce);
-    return;
+  function stop(){
+    running = false;
+    stopLoop();
+    setMode("Not running");
+    setStatus("Idle");
+    setLock("none");
+    setProgress("—");
   }
 
-  // Show x-corner search box
-  drawRegionPreview(full, `AUTO-FIND: found redX density=${xCorner.density.toFixed(2)}`, { ...xCorner.searchBox, color: "deepskyblue" });
-
-  // 3) Learn anchor patch around x-corner and save it
-  const learned = learnAnchorAt(full, xCorner);
-
-  // 4) Save lock position at the x-corner coordinate and STOP scanning
-  setLockedAt(xCorner.x, xCorner.y, `Learned anchor ${learned.w}x${learned.h} at (${learned.ax},${learned.ay}).`);
-
-  // Also show learned anchor patch in preview for sanity (optional)
-  const patch = captureRegion(learned.ax, learned.ay, learned.w, learned.h);
-  if (patch) drawRegionPreview(patch, "LEARNED ANCHOR PATCH (saved)", { x: learned.dx-6, y: learned.dy-6, w: 12, h: 12, color: "lime" });
-}
-
-// ============================================================
-// Controls
-// ============================================================
-
-async function start(){
-  if (!window.alt1) { setStatus("Alt1 missing"); dbg("Open inside Alt1 Toolkit."); return; }
-  if (!alt1.permissionPixel) { setStatus("No pixel permission"); dbg("Enable Alt1 pixel permission."); return; }
-  if (typeof captureRegion !== "function" || typeof findAnchor !== "function") {
-    setStatus("matcher.js not ready");
-    dbg(JSON.stringify({ captureRegion: typeof captureRegion, findAnchor: typeof findAnchor }, null, 2));
-    return;
+  function clear(){
+    delKey(LS_LOCK_POS);
+    delKey(LS_ANCHOR);
+    updateSavedLockLabel();
+    setStatus("Saved lock cleared");
+    setLock("none");
+    setProgress("—");
   }
 
-  running = true;
+  // ---------- Wire buttons ----------
+  if (testBtn) testBtn.onclick = () => alert("flash test");
+  if (startBtn) startBtn.onclick = () => start().catch(e => dbg(String(e)));
+  if (stopBtn) stopBtn.onclick = () => stop();
+  if (autoFindBtn) autoFindBtn.onclick = () => { running = true; clear(); runAutoFindLoop(); };
+  if (clearLockBtn) clearLockBtn.onclick = () => clear();
 
-  setMode("Running");
-  setStatus("Checking learned anchor…");
-
-  // Fast path: verify once
-  if (verifySavedOnce()) return;
-
-  // Otherwise, auto-find and learn
-  setStatus("Learning (first time) — show a progress window and wait…");
-  autoFindAndLearnOnce();
-}
-
-function stop(){
-  running = false;
-  stopLoop();
-  setMode("Not running");
-  setStatus("Idle");
-  setLock("none");
-  setProgress("—");
-}
-
-startBtn.onclick = () => start().catch(e => dbg(String(e)));
-stopBtn.onclick = () => stop();
-autoFindBtn.onclick = () => { running = true; start().catch(e => dbg(String(e))); };
-clearLockBtn.onclick = () => { clearSaved(); setStatus("Cleared saved anchor/lock"); };
-testBtn.onclick = () => alert("flash test");
-
-// Init
-(function init(){
+  // ---------- Init ----------
   updateSavedLockLabel();
   setStatus("Idle");
   setMode("Not running");
@@ -518,8 +435,8 @@ testBtn.onclick = () => alert("flash test");
   setProgress("—");
   dbg(JSON.stringify({
     app: { version: APP_VERSION, build: BUILD_ID },
-    savedLock: loadJSON(LS_LOCK),
-    learned: loadJSON(LS_ANCHOR) ? "yes" : "no",
-    note: "Pivot: auto-detect CANCEL + redX, learn anchor patch, then verify-only."
+    savedLock: loadJSON(LS_LOCK_POS),
+    hasAnchor: !!loadJSON(LS_ANCHOR),
+    note: "Adaptive mode: Auto find learns anchor once, then Start verifies and stops scanning."
   }, null, 2));
 })();
