@@ -528,31 +528,169 @@
   }
 
   // Choose best candidate in tile by (rectScore + progressScore*weight) with progress gating.
-  function pickBestProgressCandidate(tileImg){
-    const candidates = findRectangleCandidatesInTile(tileImg);
-    if (!candidates.length) return null;
+  
+// Choose best candidate in tile by (rectScore + progressScore + cancelScore + closeXScore) with gating.
+function pickBestProgressCandidate(tileImg){
+  const candidates = findRectangleCandidatesInTile(tileImg);
+  if (!candidates.length) return null;
 
-    const weight = 0.85; // progress signature is the discriminating feature; give it real influence.
-    let best = null;
+  // Weights: progress is primary, cancel + close-x confirm it's the crafting dialog.
+  const wPB = 0.85;
+  const wCancel = 0.75;
+  const wClose = 0.35;
 
-    for (const r of candidates){
-      const pb = scoreProgressBarInRect(tileImg, r);
-      if (!pb.ok) continue;
+  let best = null;
 
-      const combined = r.rectScore + pb.score * weight;
-      const cur = {
-        rect: { x: r.x, y: r.y, w: r.w, h: r.h },
-        rectScore: r.rectScore,
-        pbScore: pb.score,
-        combinedScore: combined,
-        pb
-      };
+  for (const r of candidates){
+    const pb = scoreProgressBarInRect(tileImg, r);
+    if (!pb.ok) continue;
 
-      if (!best || cur.combinedScore > best.combinedScore) best = cur;
+    const cancel = scoreCancelButtonInRect(tileImg, r);
+    const closex = scoreCloseXInRect(tileImg, r);
+
+    // Gate: must look like a progress dialog, not just any long horizontal bar.
+    // Accept if at least one of (cancel or close-x) is present; prefer both.
+    if (!cancel.ok && !closex.ok) continue;
+
+    const combined = r.rectScore + pb.score * wPB + cancel.score * wCancel + closex.score * wClose;
+
+    const cur = {
+      rect: { x: r.x, y: r.y, w: r.w, h: r.h },
+      rectScore: r.rectScore,
+      pbScore: pb.score,
+      cancelScore: cancel.score,
+      closeScore: closex.score,
+      combinedScore: combined,
+      pb,
+      cancel,
+      closex
+    };
+
+    if (!best || cur.combinedScore > best.combinedScore) best = cur;
+  }
+
+  return best;
+}
+
+
+
+// Stage A.6: detect "Cancel" button (warm/orange bar) near bottom-center of the window.
+// Uses simple RGB rules (theme/gamma tolerant) and checks for a wide warm band.
+function scoreCancelButtonInRect(tileImg, rect){
+  const data = tileImg.data;
+  const imgW = tileImg.width;
+  const imgH = tileImg.height;
+
+  const rx = clamp(rect.x|0, 0, imgW-1);
+  const ry = clamp(rect.y|0, 0, imgH-1);
+  const rw = clamp(rect.w|0, 1, imgW-rx);
+  const rh = clamp(rect.h|0, 1, imgH-ry);
+
+  // Search bottom band of the dialog
+  const y0 = ry + Math.floor(rh * 0.68);
+  const y1 = ry + Math.floor(rh * 0.94);
+  const x0 = rx + Math.floor(rw * 0.12);
+  const x1 = rx + Math.floor(rw * 0.88);
+
+  const step = 2;
+  let bestRowFrac = 0;
+
+  for (let y = y0; y <= y1; y += step){
+    let warm = 0;
+    let total = 0;
+
+    for (let x = x0; x <= x1; x += step){
+      const p = (y*imgW + x) * 4;
+      const r = data[p], g = data[p+1], b = data[p+2];
+
+      // "Warm orange" heuristic:
+      // - red dominant, green moderately high, blue lower
+      // - avoid very dark pixels
+      const isWarm =
+        r >= 120 &&
+        g >= 70 &&
+        (r - b) >= 55 &&
+        (r - g) >= 10 &&
+        (g - b) >= 10;
+
+      warm += isWarm ? 1 : 0;
+      total++;
     }
 
-    return best;
+    const frac = total ? (warm / total) : 0;
+    if (frac > bestRowFrac) bestRowFrac = frac;
   }
+
+  // OK if we see at least one fairly wide warm band row.
+  const ok = bestRowFrac >= 0.18;
+
+  return { ok, score: bestRowFrac };
+}
+
+// Stage A.7: detect close "X" in the top-right corner of the window (edge-only).
+// We score diagonal edge density in a small corner patch.
+function scoreCloseXInRect(tileImg, rect){
+  const data = tileImg.data;
+  const imgW = tileImg.width;
+  const imgH = tileImg.height;
+
+  const rx = clamp(rect.x|0, 0, imgW-1);
+  const ry = clamp(rect.y|0, 0, imgH-1);
+  const rw = clamp(rect.w|0, 1, imgW-rx);
+  const rh = clamp(rect.h|0, 1, imgH-ry);
+
+  // Corner region size (scaled by dialog size, clamped)
+  const size = clamp(Math.floor(Math.min(rw, rh) * 0.22), 18, 30);
+
+  const cx = clamp(rx + rw - size - 2, 0, imgW - size);
+  const cy = clamp(ry + 2, 0, imgH - size);
+
+  // Build a tiny edge map using luminance diffs
+  const thr = 22;
+  const edge = new Uint8Array(size * size);
+
+  function lumAt(x,y){
+    const p = ((cy+y)*imgW + (cx+x)) * 4;
+    return toGray(data[p], data[p+1], data[p+2]);
+  }
+
+  for (let y=0; y<size; y++){
+    for (let x=0; x<size; x++){
+      const c = lumAt(x,y);
+      const r = (x+1 < size) ? lumAt(x+1,y) : c;
+      const d = (y+1 < size) ? lumAt(x,y+1) : c;
+      const m = Math.abs(c - r) + Math.abs(c - d);
+      edge[y*size + x] = (m >= thr) ? 1 : 0;
+    }
+  }
+
+  // Score along the two diagonals with a small thickness
+  const thick = 2;
+  let d1 = 0, d2 = 0, maxd = 0;
+
+  for (let i=0; i<size; i++){
+    for (let t=-thick; t<=thick; t++){
+      const x1 = i + t;
+      const y1 = i;
+      const x2 = (size - 1 - i) + t;
+      const y2 = i;
+
+      if (x1 >= 0 && x1 < size) { d1 += edge[y1*size + x1]; maxd++; }
+      if (x2 >= 0 && x2 < size) { d2 += edge[y2*size + x2]; /* maxd already counts */ }
+    }
+  }
+
+  // Normalize separately (d2 uses same count as d1 approximately)
+  const denom = Math.max(1, maxd);
+  const d1n = d1 / denom;
+  const d2n = d2 / denom;
+
+  // Require both diagonals to be present to avoid false positives (single diagonal borders).
+  const ok = (d1n >= 0.22 && d2n >= 0.22);
+
+  return { ok, score: (d1n + d2n) * 0.5, d1: d1n, d2: d2n, corner: { x: cx, y: cy, w: size, h: size } };
+}
+
 
   // Incremental scan cursor
   let scan = null;
@@ -635,7 +773,7 @@
     if (best) {
       drawRegionPreview(
         cap.img,
-        `SCAN ${half.name} tile#${scan.tileIndex} rect=${best.rectScore.toFixed(3)} pb=${best.pbScore.toFixed(3)} comb=${best.combinedScore.toFixed(3)}`,
+        `SCAN ${half.name} tile#${scan.tileIndex} rect=${best.rectScore.toFixed(3)} pb=${best.pbScore.toFixed(3)} ca=${best.cancelScore.toFixed(3)} x=${best.closeScore.toFixed(3)} comb=${best.combinedScore.toFixed(3)}`,
         best.rect,
         "orange",
         { bar: best.pb.bar }
@@ -646,6 +784,10 @@
         score: best.combinedScore,
         rectScore: best.rectScore,
         pbScore: best.pbScore,
+        cancelScore: best.cancelScore,
+        closeScore: best.closeScore,
+        cancel: best.cancel,
+        closex: best.closex,
         absX: tx + best.rect.x,
         absY: ty + best.rect.y,
         w: best.rect.w,
@@ -750,7 +892,18 @@
         return;
       }
 
-      const move = Math.abs((b2.boundaryX ?? 0) - (b1.boundaryX ?? 0));
+      
+// Re-check dialog-specific cues on frame2 to avoid drifting onto other panels.
+const relRect = { x: 0, y: 0, w: absRect.w, h: absRect.h };
+const c2 = scoreCancelButtonInRect(b2.img, relRect);
+const x2 = scoreCloseXInRect(b2.img, relRect);
+if (!c2.ok && !x2.ok) {
+  dbg(JSON.stringify({ stage: "pb2", ok: false, reason: "no cancel/closex on frame2", c2, x2, hit }, null, 2));
+  doneCb(false);
+  return;
+}
+
+const move = Math.abs((b2.boundaryX ?? 0) - (b1.boundaryX ?? 0));
       const okMove = move >= PB2.minBoundaryMovePx;
 
       const okStrong = (b1.pbScore >= PB2.strongSingleFrameScore) || (b2.pbScore >= PB2.strongSingleFrameScore);
@@ -873,7 +1026,7 @@
         return;
       }
 
-      setStatus(`Candidate found (${hit.half}) rect=${hit.rectScore.toFixed(3)} pb=${hit.pbScore.toFixed(3)}. Confirming…`);
+      setStatus(`Candidate found (${hit.half}) rect=${hit.rectScore.toFixed(3)} pb=${hit.pbScore.toFixed(3)} ca=${hit.cancelScore.toFixed(3)} x=${hit.closeScore.toFixed(3)}. Confirming…`);
 
       confirmThenLearn(hit, (okLearned) => {
         if (!running) return;
