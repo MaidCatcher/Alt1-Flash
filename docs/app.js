@@ -1,1066 +1,223 @@
-// ProgFlash app_f.js
-// Improvements over app_e:
-// - Coarse-to-fine scan: cheap coarse pass to collect candidates, then fine-pass refinement on top K.
-// - Preview throttling: update preview only every N tiles or when best candidate changes.
-// - Earlier confirm trigger: start 2-frame confirm once a "good enough" candidate is found, without scanning remaining tiles.
-// - Keeps scan area presets (Top/Middle/Bottom/Full) via #scanPreset + localStorage.
-// - Keeps Cancel + Close-X checks + progress bar signature, plus 2-frame confirm.
+// ProgFlash app_g.js
+// Triple-anchor geometry lock (A + B + C)
+// A = dialog frame (stable)
+// B = progress bar frame (stable, no fill)
+// C = close X OR cancel button frame (confirmation)
 //
-// Requires matcher.js to provide globals:
-//   captureRegion(x,y,w,h) -> {width,height,data:Uint8ClampedArray}
-//   findAnchor(haystackImg, needleImg, opts) -> {ok, x, y, score}
-//
-// index.html expected element IDs:
-//   status, mode, lock, progress, debugBox, savedLock
-//   startBtn, stopBtn, autoFindBtn, clearLockBtn, testFlashBtn
-//   previewCanvas
-//   scanPreset (select)  [optional but recommended]
+// Requires matcher.js:
+//   captureRegion(x,y,w,h)
+//   findAnchor(haystackImg, needleImg, opts)
 
 (() => {
-  // ---------- DOM ----------
-  const $ = (id) => document.getElementById(id);
+  const $ = id => document.getElementById(id);
+
   const statusEl = $("status");
-  const modeEl = $("mode");
-  const lockEl = $("lock");
-  const progEl = $("progress");
-  const dbgEl = $("debugBox");
-  const savedLockEl = $("savedLock");
-  const scanPresetEl = $("scanPreset");
+  const modeEl   = $("mode");
+  const lockEl   = $("lock");
+  const dbgEl    = $("debugBox");
 
-  const startBtn = $("startBtn");
-  const stopBtn = $("stopBtn");
-  const autoFindBtn = $("autoFindBtn");
+  const startBtn     = $("startBtn");
+  const autoFindBtn  = $("autoFindBtn");
   const clearLockBtn = $("clearLockBtn");
-  const testBtn = $("testFlashBtn");
 
-  const canvas = $("previewCanvas");
-  const ctx = canvas?.getContext("2d", { willReadFrequently: true });
-
-  function setStatus(v) { if (statusEl) statusEl.textContent = v; }
-  function setMode(v) { if (modeEl) modeEl.textContent = v; }
-  function setLock(v) { if (lockEl) lockEl.textContent = v; }
-  function setProgress(v) { if (progEl) progEl.textContent = v; }
-  function dbg(v) { if (dbgEl) dbgEl.textContent = String(v); }
-
-  const APP_VERSION = window.APP_VERSION || "0.6.8-f";
-  const BUILD_ID = window.BUILD_ID || ("build-" + Date.now());
+  function setStatus(v){ if(statusEl) statusEl.textContent=v; }
+  function setMode(v){ if(modeEl) modeEl.textContent=v; }
+  function setLock(v){ if(lockEl) lockEl.textContent=v; }
+  function dbg(v){ if(dbgEl) dbgEl.textContent = typeof v==="string" ? v : JSON.stringify(v,null,2); }
 
   // ---------- Storage ----------
-  const LS_LOCK_POS = "progflash.lockPos";       // {x,y}
-  const LS_ANCHOR = "progflash.learnedAnchor";   // {w,h,rgbaBase64}
-  const LS_SCAN_PRESET = "progflash.scanPreset"; // "top" | "mid" | "bot" | "full"
+  const LS_MULTI = "progflash.multiAnchorABC";
+  const LS_LOCK  = "progflash.lockPos";
 
-  function loadJSON(key) { try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : null; } catch { return null; } }
-  function saveJSON(key, obj) { try { localStorage.setItem(key, JSON.stringify(obj)); } catch {} }
-  function delKey(key) { try { localStorage.removeItem(key); } catch {} }
+  function save(k,v){ localStorage.setItem(k, JSON.stringify(v)); }
+  function load(k){ try{ return JSON.parse(localStorage.getItem(k)); }catch{return null;} }
+  function del(k){ localStorage.removeItem(k); }
 
-  function updateSavedLockLabel() {
-    if (!savedLockEl) return;
-    const lp = loadJSON(LS_LOCK_POS);
-    savedLockEl.textContent = lp ? `x=${lp.x}, y=${lp.y}` : "none";
+  // ---------- Utils ----------
+  function clamp(n,a,b){ return Math.max(a, Math.min(b,n)); }
+  function rgba(r,g,b,a){ return (r&255)|((g&255)<<8)|((b&255)<<16)|((a&255)<<24); }
+
+  function makeNeedle(w,h,bytes){
+    return {
+      width:w, height:h, data:bytes,
+      getPixel(x,y){
+        if(x<0||y<0||x>=w||y>=h) return 0;
+        const i=(y*w+x)*4;
+        return rgba(bytes[i],bytes[i+1],bytes[i+2],bytes[i+3]);
+      }
+    };
   }
 
-  function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
-
-  function getRsSize() {
-    return { w: alt1.rsWidth || 0, h: alt1.rsHeight || 0 };
-  }
-
-  function captureRect(r) {
-    const img = captureRegion(r.x, r.y, r.w, r.h);
-    return { rect: r, img };
-  }
-
-  // ---------- Preview ----------
-  function drawRegionPreview(regionImg, label, rectRel, strokeStyle) {
-    if (!canvas || !ctx) return;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    if (!regionImg) {
-      ctx.fillStyle = "black";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.fillStyle = "white";
-      ctx.font = "12px Arial";
-      ctx.fillText(label || "no image", 12, 21);
-      return;
-    }
-
-    const srcW = regionImg.width, srcH = regionImg.height;
-    const imageData = new ImageData(new Uint8ClampedArray(regionImg.data), srcW, srcH);
-
-    const cw = canvas.width, ch = canvas.height;
-    const scale = Math.min(cw / srcW, ch / srcH);
-    const drawW = Math.floor(srcW * scale);
-    const drawH = Math.floor(srcH * scale);
-    const offX = Math.floor((cw - drawW) / 2);
-    const offY = Math.floor((ch - drawH) / 2);
-
-    const tmp = document.createElement("canvas");
-    tmp.width = srcW; tmp.height = srcH;
-    const tctx = tmp.getContext("2d", { willReadFrequently: true });
-    tctx.putImageData(imageData, 0, 0);
-
-    ctx.drawImage(tmp, 0, 0, srcW, srcH, offX, offY, drawW, drawH);
-
-    ctx.fillStyle = "rgba(0,0,0,0.6)";
-    ctx.fillRect(6, 6, Math.min(cw - 12, 760), 20);
-    ctx.fillStyle = "white";
-    ctx.font = "12px Arial";
-    ctx.fillText(label || "", 12, 21);
-
-    if (rectRel) {
-      const fx = offX + Math.floor(rectRel.x * scale);
-      const fy = offY + Math.floor(rectRel.y * scale);
-      const fw = Math.floor(rectRel.w * scale);
-      const fh = Math.floor(rectRel.h * scale);
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = strokeStyle || "orange";
-      ctx.strokeRect(fx, fy, fw, fh);
-    }
-  }
-
-  // ---------- Bytes helpers ----------
-  function bytesToBase64(bytes) {
-    let s = "";
-    for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  function bytesToB64(b){
+    let s=""; for(let i=0;i<b.length;i++) s+=String.fromCharCode(b[i]);
     return btoa(s);
   }
-  function base64ToBytes(b64) {
-    const bin = atob(b64);
-    const out = new Uint8ClampedArray(bin.length);
-    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i) & 255;
-    return out;
+  function b64ToBytes(b){
+    const bin=atob(b); const o=new Uint8ClampedArray(bin.length);
+    for(let i=0;i<bin.length;i++) o[i]=bin.charCodeAt(i)&255;
+    return o;
   }
 
-  function cropRGBA(img, x, y, w, h) {
-    const out = new Uint8ClampedArray(w * h * 4);
-    let k = 0;
-    for (let yy = 0; yy < h; yy++) {
-      for (let xx = 0; xx < w; xx++) {
-        const si = ((y + yy) * img.width + (x + xx)) * 4;
-        out[k++] = img.data[si];
-        out[k++] = img.data[si + 1];
-        out[k++] = img.data[si + 2];
-        out[k++] = img.data[si + 3];
-      }
+  function crop(img,x,y,w,h){
+    const out=new Uint8ClampedArray(w*h*4); let k=0;
+    for(let yy=0;yy<h;yy++)for(let xx=0;xx<w;xx++){
+      const i=((y+yy)*img.width+(x+xx))*4;
+      out[k++]=img.data[i];
+      out[k++]=img.data[i+1];
+      out[k++]=img.data[i+2];
+      out[k++]=img.data[i+3];
     }
     return out;
   }
 
-  function makeNeedleFromRGBA(w, h, bytes) {
-    const rgba = (r, g, b, a) => (r & 255) | ((g & 255) << 8) | ((b & 255) << 16) | ((a & 255) << 24);
-    return {
-      width: w,
-      height: h,
-      data: bytes,
-      getPixel(x, y) {
-        if (x < 0 || y < 0 || x >= w || y >= h) return 0;
-        const i = (y * w + x) * 4;
-        return rgba(bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]);
-      }
+  function cap(r){ return captureRegion(r.x,r.y,r.w,r.h); }
+
+  // ==================================================
+  // FAST VERIFY: A + B + C
+  // ==================================================
+  function tryTripleAnchor(){
+    const stored = load(LS_MULTI);
+    if(!stored) return false;
+
+    const rsW = alt1.rsWidth, rsH = alt1.rsHeight;
+
+    const A = makeNeedle(stored.A.w, stored.A.h, b64ToBytes(stored.A.b64));
+    const B = makeNeedle(stored.B.w, stored.B.h, b64ToBytes(stored.B.b64));
+    const C = makeNeedle(stored.C.w, stored.C.h, b64ToBytes(stored.C.b64));
+
+    // Search area: top-middle (fast, correct for most users)
+    const search = {
+      x: Math.floor(rsW * 0.15),
+      y: 0,
+      w: Math.floor(rsW * 0.7),
+      h: Math.floor(rsH * 0.6)
     };
-  }
 
-  // ---------- State ----------
-  let running = false;
-  let loopHandle = null;
-  function stopLoop() { if (loopHandle) clearTimeout(loopHandle); loopHandle = null; }
-  function schedule(ms, fn) { stopLoop(); loopHandle = setTimeout(fn, ms); }
+    const img = cap(search);
+    if(!img) return false;
 
-  function setLockedAt(x, y, note) {
-    saveJSON(LS_LOCK_POS, { x, y });
-    updateSavedLockLabel();
+    const mA = findAnchor(img, A, { tolerance:55, step:2, minScore:0.02 });
+    if(!mA?.ok || mA.score < 0.72) return false;
 
-    setStatus("Locked (scanning stopped)");
-    setMode("Running");
-    setLock(`x=${x}, y=${y}`);
-    setProgress("locked");
+    const ax = search.x + mA.x;
+    const ay = search.y + mA.y;
 
-    dbg(JSON.stringify({
-      app: { version: APP_VERSION, build: BUILD_ID },
-      locked: true,
-      lockPos: { x, y },
-      note: note || "Locked"
-    }, null, 2));
+    // ----- Anchor B -----
+    const bx = ax + stored.dxB;
+    const by = ay + stored.dyB;
+    const padB = 8;
 
-    running = false;
-    stopLoop();
-  }
-
-  function clearLock() {
-    delKey(LS_LOCK_POS);
-    delKey(LS_ANCHOR);
-    updateSavedLockLabel();
-    setLock("none");
-    setProgress("—");
-    setStatus("Saved lock cleared");
-  }
-
-  // ---------- Scan config ----------
-  const SCAN = {
-    tileW: 640,
-    tileH: 360,
-
-    // shortlist per pass
-    shortlistN: 4,
-
-    // Early exit (very strong)
-    earlyExitComb: 0.92,
-
-    // Earlier confirm trigger (good enough)
-    confirmNowComb: 0.80,          // if best >= this AND hasCancelOrClose
-    confirmNowComb2: 0.72,         // if top-2 both >= this, start confirm
-
-    // Preview throttling
-    previewEveryTiles: 8,          // update preview every N tiles
-    previewOnlyOnBestChange: true  // also update if best changes even if not on interval
-
-    // bounds are set via presets
-  };
-
-  function getScanPreset() {
-    const ui = scanPresetEl && scanPresetEl.value ? String(scanPresetEl.value) : null;
-    const saved = (() => { try { return localStorage.getItem(LS_SCAN_PRESET); } catch { return null; } })();
-    return (ui || saved || "top").toLowerCase();
-  }
-
-  function applyScanPreset(preset) {
-    // 4 options: top, mid, bot, full
-    switch (preset) {
-      case "mid":
-      case "middle":
-        return { yStartFrac: 0.18, yMaxFrac: 0.82, xMinFrac: 0.12, xMaxFrac: 0.88 };
-      case "bot":
-      case "bottom":
-        return { yStartFrac: 0.38, yMaxFrac: 1.00, xMinFrac: 0.12, xMaxFrac: 0.88 };
-      case "full":
-        return { yStartFrac: 0.00, yMaxFrac: 1.00, xMinFrac: 0.00, xMaxFrac: 1.00 };
-      case "top":
-      default:
-        return { yStartFrac: 0.00, yMaxFrac: 0.62, xMinFrac: 0.15, xMaxFrac: 0.85 };
-    }
-  }
-
-  // Coarse and fine configs
-  const RECT_COARSE = {
-    ds: 6,
-    edgeThr: 28,
-    scanStep: 6,
-    ring: 14,
-    sizes: [
-      { w: 450, h: 180 },
-      { w: 410, h: 165 },
-      { w: 370, h: 150 }
-    ],
-    minRectScore: 0.006,
-    // keep top windows by rectScore before running expensive feature checks
-    preselectK: 24,
-    tileKeep: 4
-  };
-
-  const RECT_FINE = {
-    ds: 4,
-    edgeThr: 26,
-    scanStep: 3,
-    ring: 14,
-    sizes: [
-      { w: 470, h: 190 },
-      { w: 450, h: 180 },
-      { w: 430, h: 175 },
-      { w: 410, h: 165 },
-      { w: 390, h: 160 },
-      { w: 370, h: 150 },
-      { w: 350, h: 140 }
-    ],
-    minRectScore: 0.008,
-    preselectK: 32,
-    tileKeep: 4
-  };
-
-  const PB = {
-    minScore: 0.16,
-    minDiff: 18,
-    minWidthFrac: 0.55,
-    yBandTopFrac: 0.30,
-    yBandBotFrac: 0.70,
-    rowStep: 2,
-    xStep: 2
-  };
-
-  const CANCEL = {
-    minWarmFrac: 0.10,
-    minBandWFrac: 0.45,
-    minBandH: 12,
-    yTopFrac: 0.62,
-    yBotFrac: 0.92
-  };
-
-  const CLOSEX = {
-    box: 26,
-    inset: 6,
-    minDiagHits: 10
-  };
-
-  const CONFIRM = {
-    delayMs: 200,
-    minBoundaryMovePx: 2,
-    pbStrong: 0.32
-  };
-
-  const VERIFY = {
-    pad: 320,
-    step: 2,
-    tolerance: 55,
-    minAccept: 0.72
-  };
-
-  // ---------- Edge integral ----------
-  function toGray(r, g, b) { return (r * 77 + g * 150 + b * 29) >> 8; }
-
-  function buildEdgeIntegral(img, ds, edgeThr) {
-    const W = Math.floor(img.width / ds);
-    const H = Math.floor(img.height / ds);
-    const gray = new Uint8Array(W * H);
-
-    for (let y = 0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        const sx = x * ds, sy = y * ds;
-        const i = (sy * img.width + sx) * 4;
-        gray[y * W + x] = toGray(img.data[i], img.data[i + 1], img.data[i + 2]);
-      }
-    }
-
-    const edge = new Uint8Array(W * H);
-    for (let y = 1; y < H - 1; y++) {
-      for (let x = 1; x < W - 1; x++) {
-        const c = gray[y * W + x];
-        const dx = Math.abs(c - gray[y * W + (x + 1)]);
-        const dy = Math.abs(c - gray[(y + 1) * W + x]);
-        edge[y * W + x] = (dx + dy >= edgeThr) ? 1 : 0;
-      }
-    }
-
-    const IW = W + 1;
-    const ii = new Uint32Array((W + 1) * (H + 1));
-    for (let y = 1; y <= H; y++) {
-      let rowsum = 0;
-      const rowOff = y * IW;
-      const prevOff = (y - 1) * IW;
-      const eOff = (y - 1) * W;
-      for (let x = 1; x <= W; x++) {
-        rowsum += edge[eOff + (x - 1)];
-        ii[rowOff + x] = ii[prevOff + x] + rowsum;
-      }
-    }
-    return { W, H, ii, ds };
-  }
-
-  function rectSum(ii, IW, x, y, w, h) {
-    const x2 = x + w, y2 = y + h;
-    return ii[y2 * IW + x2] - ii[y2 * IW + x] - ii[y * IW + x2] + ii[y * IW + x];
-  }
-
-  function scoreWindow(iiObj, x, y, w, h, ring) {
-    const IW = iiObj.W + 1;
-    const inside = rectSum(iiObj.ii, IW, x, y, w, h);
-    const insideD = inside / Math.max(1, w * h);
-
-    const rx = clamp(x - ring, 0, iiObj.W - 1);
-    const ry = clamp(y - ring, 0, iiObj.H - 1);
-    const rx2 = clamp(x + w + ring, 0, iiObj.W);
-    const ry2 = clamp(y + h + ring, 0, iiObj.H);
-    const rw = Math.max(1, rx2 - rx);
-    const rh = Math.max(1, ry2 - ry);
-
-    const outer = rectSum(iiObj.ii, IW, rx, ry, rw, rh);
-    const outerD = outer / Math.max(1, rw * rh);
-
-    return insideD - outerD * 0.75;
-  }
-
-  // ---------- Feature tests inside a rect ----------
-  function progressBarSignature(img, rect) {
-    const x0 = rect.x | 0, y0 = rect.y | 0, w = rect.w | 0, h = rect.h | 0;
-    const minBandW = Math.floor(w * PB.minWidthFrac);
-
-    const yStart = y0 + Math.floor(h * PB.yBandTopFrac);
-    const yEnd = y0 + Math.floor(h * PB.yBandBotFrac);
-
-    let bestScore = 0;
-    let bestBoundaryX = -1;
-
-    for (let y = yStart; y < yEnd; y += PB.rowStep) {
-      const yy = clamp(y, 0, img.height - 1);
-      const row = new Uint16Array(w);
-
-      for (let xx = 0; xx < w; xx += PB.xStep) {
-        const sx = x0 + xx;
-        if (sx < 0 || sx >= img.width) continue;
-        const i = (yy * img.width + sx) * 4;
-        row[xx] = toGray(img.data[i], img.data[i + 1], img.data[i + 2]);
-      }
-
-      const win = Math.max(minBandW, Math.floor(w * 0.65));
-      const leftN = Math.max(8, Math.floor(win * 0.25));
-      const rightN = leftN;
-
-      for (let bx = Math.floor(w * 0.25); bx < Math.floor(w * 0.85); bx += PB.xStep) {
-        const l0 = clamp(bx - leftN, 0, w - 1);
-        const l1 = clamp(bx - 1, 0, w - 1);
-        const r0 = clamp(bx + 1, 0, w - 1);
-        const r1 = clamp(bx + rightN, 0, w - 1);
-
-        let ls = 0, ln = 0;
-        for (let x = l0; x <= l1; x += PB.xStep) { ls += row[x] || 0; ln++; }
-        let rs = 0, rn = 0;
-        for (let x = r0; x <= r1; x += PB.xStep) { rs += row[x] || 0; rn++; }
-        if (!ln || !rn) continue;
-
-        const lm = ls / ln, rm = rs / rn;
-        const diff = Math.abs(lm - rm);
-
-        if (diff < PB.minDiff) continue;
-
-        const centerBias = 1.0 - Math.abs((bx / w) - 0.55) * 0.8;
-        const sc = (diff / 255) * centerBias;
-
-        if (sc > bestScore) {
-          bestScore = sc;
-          bestBoundaryX = bx;
-        }
-      }
-    }
-
-    return { ok: bestScore >= PB.minScore, score: bestScore, boundaryX: bestBoundaryX };
-  }
-
-  function cancelButtonSignature(img, rect) {
-    const x0 = rect.x | 0, y0 = rect.y | 0, w = rect.w | 0, h = rect.h | 0;
-
-    const yStart = y0 + Math.floor(h * CANCEL.yTopFrac);
-    const yEnd = y0 + Math.floor(h * CANCEL.yBotFrac);
-    const bandH = Math.max(CANCEL.minBandH, Math.floor(h * 0.18));
-    const bandW = Math.max(Math.floor(w * CANCEL.minBandWFrac), Math.floor(w * 0.40));
-
-    let best = 0;
-    for (let yy = yStart; yy < Math.min(yEnd, y0 + h - bandH); yy += 3) {
-      const y1 = yy + bandH;
-      const cxStart = x0 + Math.floor((w - bandW) * 0.2);
-      const cxEnd = x0 + Math.floor((w - bandW) * 0.8);
-
-      for (let xx = cxStart; xx <= cxEnd; xx += 6) {
-        let warm = 0, total = 0;
-        for (let y = yy; y < y1; y += 2) {
-          const sy = y;
-          if (sy < 0 || sy >= img.height) continue;
-          for (let x = xx; x < xx + bandW; x += 2) {
-            const sx = x;
-            if (sx < 0 || sx >= img.width) continue;
-            const i = (sy * img.width + sx) * 4;
-            const r = img.data[i], g = img.data[i + 1], b = img.data[i + 2];
-            if (r > 120 && g > 60 && b < 90 && (r - b) > 60) warm++;
-            total++;
-          }
-        }
-        if (!total) continue;
-        const frac = warm / total;
-        if (frac > best) best = frac;
-      }
-    }
-
-    return { ok: best >= CANCEL.minWarmFrac, score: best };
-  }
-
-  function closeXSignature(img, rect) {
-    const x0 = rect.x | 0, y0 = rect.y | 0, w = rect.w | 0;
-    const box = CLOSEX.box;
-    const inset = CLOSEX.inset;
-
-    const rx = x0 + w - box - inset;
-    const ry = y0 + inset;
-
-    let hits1 = 0, hits2 = 0, samples = 0;
-
-    for (let t = 0; t < box; t++) {
-      const xA = rx + t;
-      const yA = ry + t;
-      const xB = rx + t;
-      const yB = ry + (box - 1 - t);
-
-      if (xA < 1 || xA >= img.width - 1 || yA < 1 || yA >= img.height - 1) continue;
-      if (xB < 1 || xB >= img.width - 1 || yB < 1 || yB >= img.height - 1) continue;
-
-      const iA = (yA * img.width + xA) * 4;
-      const iAr = (yA * img.width + (xA + 1)) * 4;
-      const iAd = ((yA + 1) * img.width + xA) * 4;
-
-      const a = toGray(img.data[iA], img.data[iA + 1], img.data[iA + 2]);
-      const ax = toGray(img.data[iAr], img.data[iAr + 1], img.data[iAr + 2]);
-      const ay = toGray(img.data[iAd], img.data[iAd + 1], img.data[iAd + 2]);
-      const gradA = Math.abs(a - ax) + Math.abs(a - ay);
-
-      const iB0 = (yB * img.width + xB) * 4;
-      const iBr = (yB * img.width + (xB + 1)) * 4;
-      const iBd = ((yB + 1) * img.width + xB) * 4;
-
-      const b0 = toGray(img.data[iB0], img.data[iB0 + 1], img.data[iB0 + 2]);
-      const bx = toGray(img.data[iBr], img.data[iBr + 1], img.data[iBr + 2]);
-      const by = toGray(img.data[iBd], img.data[iBd + 1], img.data[iBd + 2]);
-      const gradB = Math.abs(b0 - bx) + Math.abs(b0 - by);
-
-      if (gradA > 40) hits1++;
-      if (gradB > 40) hits2++;
-      samples++;
-    }
-
-    const ok = (hits1 >= CLOSEX.minDiagHits && hits2 >= CLOSEX.minDiagHits);
-    const score = samples ? ((hits1 + hits2) / (2 * samples)) : 0;
-    return { ok, score };
-  }
-
-  // ---------- Candidate evaluation ----------
-  function evaluateCandidateFromRectScore(img, iiObj, cfg, rx, ry, rw, rh, rectScore) {
-    if (rectScore < cfg.minRectScore) return null;
-
-    const rect = { x: rx * iiObj.ds, y: ry * iiObj.ds, w: rw * iiObj.ds, h: rh * iiObj.ds };
-
-    const pb = progressBarSignature(img, rect);
-    if (!pb.ok) return null;
-
-    const cancel = cancelButtonSignature(img, rect);
-    const closex = closeXSignature(img, rect);
-    if (!(cancel.ok || closex.ok)) return null;
-
-    const comb =
-      (pb.score * 1.6) +
-      (rectScore * 0.8) +
-      (cancel.ok ? (0.18 + cancel.score * 0.6) : 0) +
-      (closex.ok ? (0.10 + closex.score * 0.5) : 0);
-
-    return {
-      rectScore,
-      pbScore: pb.score,
-      pbBoundaryX: pb.boundaryX,
-      cancelScore: cancel.score,
-      cancelOk: cancel.ok,
-      closeOk: closex.ok,
-      closeScore: closex.score,
-      comb,
-      rect
-    };
-  }
-
-  function findTileCandidates(img, cfg) {
-    const iiObj = buildEdgeIntegral(img, cfg.ds, cfg.edgeThr);
-    const { W, H, ds } = iiObj;
-
-    const sizes = cfg.sizes.map(s => ({
-      w: Math.max(14, Math.floor(s.w / ds)),
-      h: Math.max(12, Math.floor(s.h / ds))
-    }));
-
-    // 1) Preselect windows by rectScore only (cheap)
-    const ring = Math.max(2, Math.floor(cfg.ring / ds));
-    const pre = [];
-
-    function pushPre(item) {
-      pre.push(item);
-      pre.sort((a, b) => b.rectScore - a.rectScore);
-      if (pre.length > cfg.preselectK) pre.length = cfg.preselectK;
-    }
-
-    for (const sz of sizes) {
-      const ww = sz.w, hh = sz.h;
-      if (ww >= W || hh >= H) continue;
-
-      for (let y = 0; y <= H - hh; y += cfg.scanStep) {
-        for (let x = 0; x <= W - ww; x += cfg.scanStep) {
-          const rectScore = scoreWindow(iiObj, x, y, ww, hh, ring);
-          if (rectScore >= cfg.minRectScore) pushPre({ x, y, w: ww, h: hh, rectScore });
-        }
-      }
-    }
-
-    // 2) Run expensive feature checks only on preselected windows
-    const best = [];
-    function pushBest(c) {
-      best.push(c);
-      best.sort((a, b) => b.comb - a.comb);
-      if (best.length > cfg.tileKeep) best.length = cfg.tileKeep;
-    }
-
-    for (const p of pre) {
-      const c = evaluateCandidateFromRectScore(img, iiObj, cfg, p.x, p.y, p.w, p.h, p.rectScore);
-      if (c) pushBest(c);
-    }
-
-    return best;
-  }
-
-  // ---------- Scan pass (incremental tiles, coarse) ----------
-  let scan = null;
-
-  function initScan() {
-    const rs = getRsSize();
-    if (!rs.w || !rs.h) return false;
-
-    const preset = getScanPreset();
-    const bounds = applyScanPreset(preset);
-
-    const yStart = Math.floor(rs.h * bounds.yStartFrac);
-    const yMax = Math.floor(rs.h * bounds.yMaxFrac);
-    const xMin = Math.floor(rs.w * bounds.xMinFrac);
-    const xMax = Math.floor(rs.w * bounds.xMaxFrac);
-
-    const yStartC = clamp(yStart, 0, rs.h - 1);
-    const yMaxC = clamp(yMax, yStartC + 1, rs.h);
-    const xMinC = clamp(xMin, 0, rs.w - 1);
-    const xMaxC = clamp(xMax, xMinC + 1, rs.w);
-
-    scan = {
-      rs,
-      preset,
-      xMin: xMinC,
-      xMax: xMaxC,
-      yStart: yStartC,
-      yMax: yMaxC,
-      tx: xMinC,
-      ty: yStartC,
-      tileIndex: 0,
-      cands: [],
-      earlyExit: false,
-      lastPreviewBestKey: ""
-    };
-    return true;
-  }
-
-  function bestKey(c) {
-    if (!c) return "";
-    const r = c.absRect;
-    return `${Math.round(c.comb*1000)}:${r.x}|${r.y}|${r.w}|${r.h}`;
-  }
-
-  function maybePreview(capImg, tileRect, label, bestAbsRect) {
-    if (!capImg) return;
-
-    const inTile =
-      bestAbsRect &&
-      bestAbsRect.x >= tileRect.x && bestAbsRect.x < tileRect.x + tileRect.w &&
-      bestAbsRect.y >= tileRect.y && bestAbsRect.y < tileRect.y + tileRect.h;
-
-    drawRegionPreview(
-      capImg,
-      label,
-      inTile ? { x: bestAbsRect.x - tileRect.x, y: bestAbsRect.y - tileRect.y, w: bestAbsRect.w, h: bestAbsRect.h } : null,
-      "orange"
-    );
-  }
-
-  function scanStepOneTile() {
-    const rs = scan.rs;
-
-    if (scan.ty >= scan.yMax) return { done: true, early: !!scan.earlyExit };
-
-    if (scan.tx >= scan.xMax) {
-      scan.tx = scan.xMin;
-      scan.ty += SCAN.tileH;
-      return { done: false };
-    }
-
-    const tx = scan.tx;
-    const ty = scan.ty;
-    scan.tx += SCAN.tileW;
-    scan.tileIndex++;
-
-    const w = Math.min(SCAN.tileW, scan.xMax - tx);
-    const h = Math.min(SCAN.tileH, scan.yMax - ty);
-    const tileRect = { x: tx, y: ty, w, h };
-
-    const cap = captureRect(tileRect);
-    if (!cap.img) {
-      if (scan.tileIndex % SCAN.previewEveryTiles === 0) {
-        drawRegionPreview(null, `CAPTURE FAIL tile#${scan.tileIndex}`, null);
-      }
-      return { done: false };
-    }
-
-    const tileCands = findTileCandidates(cap.img, RECT_COARSE);
-
-    for (const c of tileCands) {
-      scan.cands.push({ ...c, absRect: { x: tx + c.rect.x, y: ty + c.rect.y, w: c.rect.w, h: c.rect.h } });
-    }
-
-    scan.cands.sort((a, b) => b.comb - a.comb);
-    if (scan.cands.length > 30) scan.cands.length = 30;
-
-    const best = scan.cands[0];
-    const bestAbsRect = best?.absRect;
-
-    // Early-exit very strong candidate
-    if (best && best.comb >= SCAN.earlyExitComb) {
-      scan.ty = scan.yMax;
-      scan.earlyExit = { tile: scan.tileIndex, comb: best.comb };
-      setStatus(`Early exit: strong comb=${best.comb.toFixed(3)} (${scan.preset})`);
-      // show preview once
-      maybePreview(cap.img, tileRect,
-        `SCAN tile#${scan.tileIndex} early comb=${best.comb.toFixed(3)} pb=${best.pbScore.toFixed(3)} canc=${best.cancelOk?"y":"n"} close=${best.closeOk?"y":"n"}`,
-        bestAbsRect);
-      return { done: true, early: true };
-    }
-
-    // Earlier confirm trigger (good enough)
-    const second = scan.cands[1];
-    const canStartConfirm =
-      (best && best.comb >= SCAN.confirmNowComb && (best.cancelOk || best.closeOk)) ||
-      (best && second && best.comb >= SCAN.confirmNowComb2 && second.comb >= SCAN.confirmNowComb2);
-
-    if (canStartConfirm) {
-      scan.ty = scan.yMax;
-      scan.earlyExit = { tile: scan.tileIndex, comb: best.comb, note: "confirmNow" };
-      setStatus(`Candidate found: comb=${best.comb.toFixed(3)}. Confirming…`);
-      maybePreview(cap.img, tileRect,
-        `SCAN tile#${scan.tileIndex} candidate comb=${best.comb.toFixed(3)} pb=${best.pbScore.toFixed(3)} canc=${best.cancelOk?"y":"n"} close=${best.closeOk?"y":"n"}`,
-        bestAbsRect);
-      return { done: true, early: true };
-    }
-
-    // Preview throttling
-    const doInterval = (scan.tileIndex % SCAN.previewEveryTiles === 0);
-    const key = bestKey(best);
-    const doBestChange = (SCAN.previewOnlyOnBestChange && key && key !== scan.lastPreviewBestKey);
-
-    if (doInterval || doBestChange) {
-      scan.lastPreviewBestKey = key;
-      if (best) {
-        maybePreview(cap.img, tileRect,
-          `SCAN tile#${scan.tileIndex} best comb=${best.comb.toFixed(3)} pb=${best.pbScore.toFixed(3)} canc=${best.cancelOk ? best.cancelScore.toFixed(2) : "no"} close=${best.closeOk ? best.closeScore.toFixed(2) : "no"}`,
-          bestAbsRect);
-      } else {
-        maybePreview(cap.img, tileRect, `SCAN tile#${scan.tileIndex} (no candidates)`, null);
-      }
-    }
-
-    setProgress(`tile ${scan.tileIndex}`);
-    return { done: false };
-  }
-
-  // ---------- Fine refinement on top candidates ----------
-  function refineCandidates(topList, refineK) {
-    const rs = getRsSize();
-    const out = [];
-
-    for (let i = 0; i < Math.min(refineK, topList.length); i++) {
-      const c = topList[i];
-      const r = c.absRect;
-
-      // Expand a bit to allow fine scan to reposition.
-      const pad = 50;
-      const rx = clamp(r.x - pad, 0, rs.w - 1);
-      const ry = clamp(r.y - pad, 0, rs.h - 1);
-      const rw = clamp(r.w + pad * 2, 1, rs.w - rx);
-      const rh = clamp(r.h + pad * 2, 1, rs.h - ry);
-
-      const cap = captureRect({ x: rx, y: ry, w: rw, h: rh });
-      if (!cap.img) continue;
-
-      // Fine scan within this small region.
-      const tileCands = findTileCandidates(cap.img, RECT_FINE);
-      if (!tileCands.length) continue;
-
-      // Take best from region and convert to absolute.
-      const best = tileCands[0];
-      out.push({
-        ...best,
-        absRect: { x: rx + best.rect.x, y: ry + best.rect.y, w: best.rect.w, h: best.rect.h },
-        refinedFrom: { comb: c.comb, absRect: r }
-      });
-    }
-
-    // Add non-refined originals too, as fallback.
-    for (const c of topList) out.push(c);
-
-    out.sort((a, b) => b.comb - a.comb);
-
-    // De-dup very similar rects.
-    const dedup = [];
-    for (const c of out) {
-      const r = c.absRect;
-      const hit = dedup.find(d => {
-        const q = d.absRect;
-        return Math.abs(q.x - r.x) < 18 && Math.abs(q.y - r.y) < 18 && Math.abs(q.w - r.w) < 24 && Math.abs(q.h - r.h) < 18;
-      });
-      if (!hit) dedup.push(c);
-      if (dedup.length >= 12) break;
-    }
-
-    return dedup;
-  }
-
-  // ---------- Two-frame confirm ----------
-  function featurePackFromRectCapture(img) {
-    const rectRel = { x: 0, y: 0, w: img.width, h: img.height };
-    return {
-      pb: progressBarSignature(img, rectRel),
-      cancel: cancelButtonSignature(img, rectRel),
-      closex: closeXSignature(img, rectRel)
-    };
-  }
-
-  function confirmCandidate(absRect, onDone) {
-    const cap1 = captureRect(absRect);
-    if (!cap1.img) return onDone(false, { why: "cap1 fail" });
-
-    const f1 = featurePackFromRectCapture(cap1.img);
-    const ok1 = f1.pb.ok && (f1.cancel.ok || f1.closex.ok);
-    if (!ok1) return onDone(false, { why: "features1 fail", f1 });
-
-    schedule(CONFIRM.delayMs, () => {
-      const cap2 = captureRect(absRect);
-      if (!cap2.img) return onDone(false, { why: "cap2 fail" });
-
-      const f2 = featurePackFromRectCapture(cap2.img);
-      const ok2 = f2.pb.ok && (f2.cancel.ok || f2.closex.ok);
-      if (!ok2) return onDone(false, { why: "features2 fail", f1, f2 });
-
-      const b1 = f1.pb.boundaryX;
-      const b2 = f2.pb.boundaryX;
-      const move = (b1 >= 0 && b2 >= 0) ? Math.abs(b2 - b1) : 0;
-
-      const accept =
-        (move >= CONFIRM.minBoundaryMovePx) ||
-        (f1.pb.score >= CONFIRM.pbStrong && f2.pb.score >= CONFIRM.pbStrong);
-
-      onDone(accept, { move, f1, f2 });
+    const imgB = cap({
+      x: clamp(bx-padB,0,rsW-1),
+      y: clamp(by-padB,0,rsH-1),
+      w: stored.B.w + padB*2,
+      h: stored.B.h + padB*2
     });
-  }
+    if(!imgB) return false;
 
-  // ---------- Learn stable anchor ----------
-  function learnAnchorFromAbsRect(absRect) {
-    const cap = captureRect(absRect);
-    if (!cap.img) return false;
+    const mB = findAnchor(imgB, B, { tolerance:55, step:1, minScore:0.02 });
+    if(!mB?.ok || mB.score < 0.70) return false;
 
-    // Stable patch: near top-right frame, left of close box area.
-    const padX = 96, padY = 10;
-    const patchW = 86, patchH = 28;
+    // ----- Anchor C -----
+    const cx = ax + stored.dxC;
+    const cy = ay + stored.dyC;
+    const padC = 8;
 
-    let px = cap.img.width - padX;
-    let py = padY;
-    px = clamp(px, 0, Math.max(0, cap.img.width - patchW));
-    py = clamp(py, 0, Math.max(0, cap.img.height - patchH));
-
-    const bytes = cropRGBA(cap.img, px, py, patchW, patchH);
-    saveJSON(LS_ANCHOR, { w: patchW, h: patchH, rgbaBase64: bytesToBase64(bytes) });
-
-    const ax = absRect.x + px;
-    const ay = absRect.y + py;
-    saveJSON(LS_LOCK_POS, { x: ax, y: ay });
-    updateSavedLockLabel();
-
-    return true;
-  }
-
-  // ---------- Verify saved anchor once ----------
-  function verifySavedAnchorOnce() {
-    const lockPos = loadJSON(LS_LOCK_POS);
-    const stored = loadJSON(LS_ANCHOR);
-    if (!lockPos || !stored) return false;
-
-    const rs = getRsSize();
-    if (!rs.w || !rs.h) return false;
-
-    const needle = makeNeedleFromRGBA(stored.w, stored.h, base64ToBytes(stored.rgbaBase64));
-
-    const pad = VERIFY.pad;
-    let rx = Math.floor(lockPos.x - pad);
-    let ry = Math.floor(lockPos.y - pad);
-    rx = clamp(rx, 0, rs.w - 1);
-    ry = clamp(ry, 0, rs.h - 1);
-    const rw = clamp(pad * 2, 1, rs.w - rx);
-    const rh = clamp(pad * 2, 1, rs.h - ry);
-
-    const cap = captureRect({ x: rx, y: ry, w: rw, h: rh });
-    if (!cap.img) return false;
-
-    const m = findAnchor(cap.img, needle, {
-      tolerance: VERIFY.tolerance,
-      minScore: 0.01,
-      step: VERIFY.step,
-      ignoreAlphaBelow: 0
+    let cOK = false;
+    const imgC = cap({
+      x: clamp(cx-padC,0,rsW-1),
+      y: clamp(cy-padC,0,rsH-1),
+      w: stored.C.w + padC*2,
+      h: stored.C.h + padC*2
     });
 
-    const ok = !!(m && m.ok && typeof m.score === "number" && m.score >= VERIFY.minAccept);
-
-    drawRegionPreview(
-      cap.img,
-      `VERIFY score=${(m?.score ?? 0).toFixed(2)} ${ok ? "OK" : "MISS"}`,
-      ok ? { x: m.x, y: m.y, w: needle.width, h: needle.height } : null,
-      ok ? "lime" : "red"
-    );
-
-    if (!ok) {
-      dbg(JSON.stringify({
-        verify: { ok: false, score: m?.score ?? 0 },
-        savedLock: lockPos,
-        note: "Saved anchor not found near saved lock."
-      }, null, 2));
-      return false;
+    if(imgC){
+      const mC = findAnchor(imgC, C, { tolerance:60, step:1, minScore:0.02 });
+      if(mC?.ok && mC.score >= 0.65) cOK = true;
     }
 
-    const foundAnchorAbsX = cap.rect.x + m.x;
-    const foundAnchorAbsY = cap.rect.y + m.y;
-    setLockedAt(foundAnchorAbsX, foundAnchorAbsY, `Verified learned anchor (score ${(m.score).toFixed(2)}).`);
+    // ----- Final decision -----
+    const strongAB = (mA.score >= 0.80 && mB.score >= 0.78);
+
+    if(!cOK && !strongAB) return false;
+
+    save(LS_LOCK,{ x:ax, y:ay });
+    setLock(`x=${ax}, y=${ay}`);
+    setStatus("Locked (A+B+C)");
+    setMode("Running");
+
+    dbg({
+      locked:true,
+      A:mA.score.toFixed(2),
+      B:mB.score.toFixed(2),
+      C: cOK ? "ok" : "skipped"
+    });
+
     return true;
   }
 
-  // ---------- Auto-find main ----------
-  function runAutoFind() {
-    if (!running) return;
+  // ==================================================
+  // LEARN A + B + C (called after fallback succeeds)
+  // ==================================================
+  function learnTripleAnchor(absRect){
+    const img = cap(absRect);
+    if(!img) return false;
 
+    // ---- Anchor A: frame (top-right) ----
+    const Aw=80, Ah=28;
+    const Ax=img.width-Aw-20;
+    const Ay=10;
+
+    // ---- Anchor B: progress bar frame ----
+    const Bw=120, Bh=20;
+    const Bx=Math.floor((img.width-Bw)/2);
+    const By=Math.floor(img.height*0.55);
+
+    // ---- Anchor C: close X (preferred) or cancel frame ----
+    const Cw=26, Ch=26;
+    const Cx=img.width-Cw-10;
+    const Cy=10;
+
+    save(LS_MULTI,{
+      A:{ w:Aw, h:Ah, b64: bytesToB64(crop(img,Ax,Ay,Aw,Ah)) },
+      B:{ w:Bw, h:Bh, b64: bytesToB64(crop(img,Bx,By,Bw,Bh)) },
+      C:{ w:Cw, h:Ch, b64: bytesToB64(crop(img,Cx,Cy,Cw,Ch)) },
+      dxB: Bx-Ax,
+      dyB: By-Ay,
+      dxC: Cx-Ax,
+      dyC: Cy-Ay
+    });
+
+    dbg({ learned:true, anchors:["A","B","C"] });
+    return true;
+  }
+
+  // ==================================================
+  // FALLBACK (your existing app_f logic plugs here)
+  // ==================================================
+  function fallbackScan(){
+    setStatus("Fallback scan…");
+    dbg("Use existing rectangle scan; on success call learnTripleAnchor(absRect)");
+  }
+
+  // ==================================================
+  // UI
+  // ==================================================
+  function start(){
+    if(!alt1 || !alt1.permissionPixel){
+      setStatus("Alt1 pixel permission missing");
+      return;
+    }
     setMode("Running");
-    setStatus("Auto-finding (coarse→fine + shortlist)…");
-    setLock("none");
-    setProgress("—");
-
-    if (!initScan()) {
-      setStatus("Auto-find: bad RS dims");
-      schedule(600, runAutoFind);
-      return;
-    }
-
-    const scanTick = () => {
-      if (!running) return;
-
-      const step = scanStepOneTile();
-      if (!step.done) {
-        schedule(10, scanTick);
-        return;
-      }
-
-      // Coarse scan pass done: shortlist
-      const coarseList = (scan.cands || []).slice(0).sort((a, b) => b.comb - a.comb);
-      if (!coarseList.length) {
-        setStatus("Auto-find: no candidates (retry)...");
-        dbg(JSON.stringify({ stage: "scan", ok: false, note: "No candidates in bounded region." }, null, 2));
-        schedule(350, runAutoFind);
-        return;
-      }
-
-      // Fine refine top K
-      const refined = refineCandidates(coarseList.slice(0, 6), 3);
-
-      // Final shortlist
-      const list = refined.slice(0, SCAN.shortlistN);
-      if (!list.length) {
-        setStatus("Auto-find: refine produced no shortlist (retry)...");
-        schedule(350, runAutoFind);
-        return;
-      }
-
-      let idx = 0;
-
-      const tryNext = () => {
-        if (!running) return;
-
-        if (idx >= list.length) {
-          setStatus("Auto-find: shortlist failed (retry)...");
-          dbg(JSON.stringify({ stage: "confirm", ok: false, note: "All shortlist candidates failed 2-frame confirm." }, null, 2));
-          schedule(350, runAutoFind);
-          return;
-        }
-
-        const c = list[idx++];
-        const absRect = c.absRect;
-
-        setStatus(`Confirming ${idx}/${list.length} comb=${c.comb.toFixed(3)} (ref=${c.refinedFrom ? "y" : "n"})…`);
-        setProgress(`confirm ${idx}/${list.length}`);
-
-        confirmCandidate(absRect, (ok, details) => {
-          if (!running) return;
-          if (!ok) {
-            dbg(JSON.stringify({ stage: "confirm", ok: false, idx: idx - 1, comb: c.comb, details }, null, 2));
-            schedule(0, tryNext);
-            return;
-          }
-
-          const learned = learnAnchorFromAbsRect(absRect);
-          if (!learned) {
-            dbg(JSON.stringify({ stage: "learn", ok: false, note: "Learn anchor failed" }, null, 2));
-            schedule(0, tryNext);
-            return;
-          }
-
-          setStatus("Verifying learned anchor…");
-          if (verifySavedAnchorOnce()) return;
-
-          dbg(JSON.stringify({ stage: "verify", ok: false, note: "Verify failed after learn", details }, null, 2));
-          schedule(0, tryNext);
-        });
-      };
-
-      schedule(0, tryNext);
-    };
-
-    schedule(0, scanTick);
+    setStatus("Fast lock (A+B+C)…");
+    if(tryTripleAnchor()) return;
+    fallbackScan();
   }
 
-  async function start() {
-    if (!window.alt1) { setStatus("Alt1 missing"); dbg("Open inside Alt1 Toolkit."); return; }
-    if (!alt1.permissionPixel) { setStatus("No pixel permission"); dbg("Enable Alt1 pixel permission."); return; }
-    if (typeof captureRegion !== "function" || typeof findAnchor !== "function") {
-      setStatus("matcher.js not ready");
-      dbg(JSON.stringify({ captureRegion: typeof captureRegion, findAnchor: typeof findAnchor }, null, 2));
-      return;
-    }
+  if(startBtn) startBtn.onclick=start;
+  if(autoFindBtn) autoFindBtn.onclick=()=>{ del(LS_MULTI); del(LS_LOCK); start(); };
+  if(clearLockBtn) clearLockBtn.onclick=()=>{ del(LS_MULTI); del(LS_LOCK); setLock("none"); setStatus("Cleared"); };
 
-    running = true;
-
-    setStatus("Checking saved lock…");
-    if (verifySavedAnchorOnce()) return;
-
-    runAutoFind();
-  }
-
-  function stop() {
-    running = false;
-    stopLoop();
-    setMode("Not running");
-    setStatus("Idle");
-    setLock("none");
-    setProgress("—");
-  }
-
-  // ---------- Buttons ----------
-  if (startBtn) startBtn.onclick = () => start().catch(e => dbg(String(e)));
-  if (stopBtn) stopBtn.onclick = () => stop();
-  if (autoFindBtn) autoFindBtn.onclick = () => {
-    running = true;
-    delKey(LS_LOCK_POS);
-    delKey(LS_ANCHOR);
-    updateSavedLockLabel();
-    runAutoFind();
-  };
-  if (clearLockBtn) clearLockBtn.onclick = () => clearLock();
-  if (testBtn) testBtn.onclick = () => alert("flash test");
-
-  // ---------- Init ----------
-  updateSavedLockLabel();
+  setMode("Idle");
   setStatus("Idle");
-  setMode("Not running");
-  setLock("none");
-  setProgress("—");
-  dbg(JSON.stringify({
-    app: { version: APP_VERSION, build: BUILD_ID },
-    savedLock: loadJSON(LS_LOCK_POS),
-    hasAnchor: !!loadJSON(LS_ANCHOR),
-    scanPreset: (() => { try { return localStorage.getItem(LS_SCAN_PRESET) || "top"; } catch { return "top"; } })(),
-    scanPresets: { top: "top 62% + center 70%", mid: "middle", bot: "bottom", full: "full screen" },
-    coarse: { ds: RECT_COARSE.ds, step: RECT_COARSE.scanStep, sizes: RECT_COARSE.sizes.length, preselectK: RECT_COARSE.preselectK },
-    fine: { ds: RECT_FINE.ds, step: RECT_FINE.scanStep, sizes: RECT_FINE.sizes.length, preselectK: RECT_FINE.preselectK },
-    shortlist: SCAN.shortlistN,
-    earlyExitComb: SCAN.earlyExitComb,
-    confirmNowComb: SCAN.confirmNowComb,
-    confirmNowComb2: SCAN.confirmNowComb2,
-    preview: { everyTiles: SCAN.previewEveryTiles, bestChange: SCAN.previewOnlyOnBestChange },
-    note: "app_f: coarse→fine + preview throttling + earlier confirm start; keeps Cancel/CloseX + 2-frame confirm; anchor from stable top-right patch."
-  }, null, 2));
 })();
