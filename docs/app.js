@@ -169,9 +169,12 @@ function isOrangeCancel(r,g,b){
   // orange-ish / amber
   return (r >= 150 && r <= 255) && (g >= 70 && g <= 170) && (b >= 0 && b <= 120) && (r > g) && (g > b);
 }
-function isRedX(r,g,b){
-  // red-ish (X icon)
-  return (r >= 170) && (g <= 120) && (b <= 120) && (r > g + 40) && (r > b + 40);
+function isRedish(r,g,b){
+  // gamma-tolerant "redness": red significantly bigger than green/blue
+  const maxGB = Math.max(g, b);
+  return (r - maxGB) > 55 && r > 90;
+}
+
 }
 
 // Downsample scan for orange density
