@@ -1,7 +1,7 @@
-// ProgFlash app.js — Adaptive anchor with rectangle (edge-density) auto-detect.
-// No shipped PNG templates. No color heuristics.
-// Stage A: incremental scan tiles for "window-like" rectangles via edge-density scoring (gamma/theme safe).
-// Stage B: learn an anchor chunk (captured from user's pixels) around the best rectangle.
+// ProgFlash app.js — Adaptive anchor with rectangle + progress-bar detector.
+// Stage A: incremental scan tiles for "window-like" rectangles via edge-density scoring,
+//          then filter/score by presence of a horizontal progress bar inside the rectangle.
+// Stage B: 2-frame confirmation (progress boundary moves) before learning/saving anchor.
 // Stage C: on Start, verify saved anchor once; if ok, lock and stop scanning.
 //
 // Requires matcher.js to provide: captureRegion(x,y,w,h) and findAnchor(haystack, needle, opts)
@@ -65,20 +65,28 @@
   }
 
   // ---------- Preview ----------
-  function drawRegionPreview(regionImg, label, rect /* relative */, strokeStyle){
-    if (!regionImg || !canvas) return;
+  function drawRegionPreview(regionImg, label, rect /* relative */, strokeStyle, extra){
+    if (!canvas) return;
+    const cw = canvas.width, ch = canvas.height;
+    ctx.clearRect(0,0,cw,ch);
+
+    if (!regionImg) {
+      ctx.fillStyle = "rgba(0,0,0,0.7)";
+      ctx.fillRect(0,0,cw,ch);
+      ctx.fillStyle = "white";
+      ctx.font = "12px Arial";
+      ctx.fillText(label || "no image", 10, 18);
+      return;
+    }
 
     const srcW = regionImg.width, srcH = regionImg.height;
     const imageData = new ImageData(new Uint8ClampedArray(regionImg.data), srcW, srcH);
 
-    const cw = canvas.width, ch = canvas.height;
     const scale = Math.min(cw / srcW, ch / srcH);
     const drawW = Math.floor(srcW * scale);
     const drawH = Math.floor(srcH * scale);
     const offX = Math.floor((cw - drawW) / 2);
     const offY = Math.floor((ch - drawH) / 2);
-
-    ctx.clearRect(0,0,cw,ch);
 
     const tmp = document.createElement("canvas");
     tmp.width = srcW; tmp.height = srcH;
@@ -89,7 +97,7 @@
 
     // label
     ctx.fillStyle = "rgba(0,0,0,0.6)";
-    ctx.fillRect(6,6,Math.min(cw-12, 740),20);
+    ctx.fillRect(6,6,Math.min(cw-12, 760),20);
     ctx.fillStyle = "white";
     ctx.font = "12px Arial";
     ctx.fillText(label, 12, 21);
@@ -102,6 +110,32 @@
       ctx.lineWidth = 2;
       ctx.strokeStyle = strokeStyle || "orange";
       ctx.strokeRect(fx, fy, fw, fh);
+
+      if (extra && extra.bar) {
+        const bx = rect.x + extra.bar.x;
+        const by = rect.y + extra.bar.y;
+        const bw = extra.bar.w;
+        const bh = extra.bar.h;
+        const bfx = offX + Math.floor(bx * scale);
+        const bfy = offY + Math.floor(by * scale);
+        const bfw = Math.floor(bw * scale);
+        const bfh = Math.floor(bh * scale);
+
+        // bar box
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "rgba(0,255,255,0.9)";
+        ctx.strokeRect(bfx, bfy, bfw, bfh);
+
+        // boundary line
+        if (typeof extra.bar.boundaryX === "number") {
+          const lx = offX + Math.floor((rect.x + extra.bar.boundaryX) * scale);
+          ctx.strokeStyle = "rgba(255,255,0,0.95)";
+          ctx.beginPath();
+          ctx.moveTo(lx, bfy);
+          ctx.lineTo(lx, bfy + bfh);
+          ctx.stroke();
+        }
+      }
     }
   }
 
@@ -189,7 +223,6 @@
 
   // ------------------------------------------------------------
   // Stage A: rectangle detection via edge-density scoring
-  // (Incremental: one tile per tick so preview is truthful and UI doesn't stall)
   // ------------------------------------------------------------
   const TILE = { w: 640, h: 360 };
 
@@ -198,8 +231,9 @@
     edgeThr: 28,
     scanStep: 3,
     sizes: [
-      { w: 440, h: 165 },
-      { w: 420, h: 155 },
+      { w: 460, h: 185 },
+      { w: 440, h: 170 },
+      { w: 420, h: 160 },
       { w: 400, h: 150 },
       { w: 380, h: 145 },
       { w: 360, h: 140 },
@@ -208,8 +242,35 @@
     ring: 14,
     minScore: 0.010,
 
-    // If TOP has any ok candidate, prefer TOP even if bottom is slightly higher.
-    topBias: 0.006
+    // Prefer TOP if close.
+    topBias: 0.006,
+
+    // Keep top candidates per tile (rect score)
+    keepTopN: 8
+  };
+
+  // ------------------------------------------------------------
+  // Stage A.5: progress-bar signature inside candidate rectangle
+  // ------------------------------------------------------------
+  const PB = {
+    xStep: 2,
+    yStep: 2,
+    stripeHeights: [8,10,12,14],
+    yBandMin: 0.25,     // search between 25%..75% of rect height
+    yBandMax: 0.75,
+    minBarWidthFrac: 0.60,
+    minDiff: 22,        // min left/right luminance step (0..255)
+    minScore: 0.10,     // min normalized progress score
+    smoothWin: 5,
+    boundaryMinFrac: 0.18,
+    boundaryMaxFrac: 0.82
+  };
+
+  // Two-frame confirmation
+  const PB2 = {
+    delayMs: 140,
+    minBoundaryMovePx: 3,     // crafting bars move steadily; 3px is a safe nudge
+    strongSingleFrameScore: 0.22 // if very strong, allow lock even if movement is tiny (paused)
   };
 
   function toGray(r,g,b){
@@ -285,7 +346,8 @@
     return insideD - outerD * 0.75;
   }
 
-  function findBestRectangleInTile(img){
+  // Return top N rectangle candidates by rect score (relative to tile).
+  function findRectangleCandidatesInTile(img){
     const iiObj = buildEdgeIntegral(img, RECT.ds, RECT.edgeThr);
     const { W, H, ds } = iiObj;
 
@@ -295,7 +357,13 @@
     }));
 
     const ring = Math.max(2, Math.floor(RECT.ring / ds));
-    let best = { score: -1e9, x: 0, y: 0, w: 0, h: 0 };
+    const best = []; // [{score,x,y,w,h}] in ds space
+
+    function pushCandidate(c){
+      best.push(c);
+      best.sort((a,b)=>b.score-a.score);
+      if (best.length > RECT.keepTopN) best.length = RECT.keepTopN;
+    }
 
     for (const sz of sizes) {
       const ww = sz.w, hh = sz.h;
@@ -304,19 +372,186 @@
       for (let y=0; y<=H-hh; y+=RECT.scanStep) {
         for (let x=0; x<=W-ww; x+=RECT.scanStep) {
           const sc = scoreWindow(iiObj, x, y, ww, hh, ring);
-          if (sc > best.score) best = { score: sc, x, y, w: ww, h: hh };
+          if (sc <= RECT.minScore) continue;
+
+          // small pruning: only keep if it can compete
+          if (best.length < RECT.keepTopN || sc > best[best.length-1].score) {
+            pushCandidate({ score: sc, x, y, w: ww, h: hh });
+          }
         }
       }
     }
 
-    return {
-      ok: best.score >= RECT.minScore,
-      score: best.score,
-      x: best.x * ds,
-      y: best.y * ds,
-      w: best.w * ds,
-      h: best.h * ds
-    };
+    // Convert to pixel space.
+    return best.map(c => ({
+      rectScore: c.score,
+      x: c.x * ds,
+      y: c.y * ds,
+      w: c.w * ds,
+      h: c.h * ds
+    }));
+  }
+
+  function smooth1D(arr, win){
+    if (win <= 1) return arr.slice();
+    const out = new Float32Array(arr.length);
+    const half = Math.floor(win/2);
+    for (let i=0;i<arr.length;i++){
+      let s=0, n=0;
+      const a = Math.max(0, i-half);
+      const b = Math.min(arr.length-1, i+half);
+      for (let j=a;j<=b;j++){ s += arr[j]; n++; }
+      out[i] = s / n;
+    }
+    return out;
+  }
+
+  // Score progress bar inside rect (relative to tile image).
+  // Returns {ok, score, boundaryX, bar:{x,y,w,h}} where boundaryX is relative to rect (not bar).
+  function scoreProgressBarInRect(tileImg, rect){
+    const data = tileImg.data;
+    const imgW = tileImg.width, imgH = tileImg.height;
+
+    // Sanity clamp rect to tile.
+    const rx = clamp(rect.x|0, 0, imgW-1);
+    const ry = clamp(rect.y|0, 0, imgH-1);
+    const rw = clamp(rect.w|0, 10, imgW - rx);
+    const rh = clamp(rect.h|0, 10, imgH - ry);
+
+    const minBarW = Math.floor(rw * PB.minBarWidthFrac);
+    const xMargin = Math.max(6, Math.floor(rw * 0.06));
+
+    const y0 = ry + Math.floor(rh * PB.yBandMin);
+    const y1 = ry + Math.floor(rh * PB.yBandMax);
+
+    let best = { score: -1, boundaryX: null, bar: null, diff: 0 };
+
+    for (let sy = y0; sy <= y1; sy += PB.yStep) {
+      for (const sh of PB.stripeHeights) {
+        const stripeH = sh;
+        const stripeY = sy;
+        if (stripeY < ry || stripeY + stripeH >= ry + rh) continue;
+
+        // sample stripe into 1D luma profile across x
+        const xs = rx + xMargin;
+        const xe = rx + rw - xMargin;
+        if (xe - xs < minBarW) continue;
+
+        const step = PB.xStep;
+        const len = Math.floor((xe - xs) / step);
+        if (len < 60) continue;
+
+        const profile = new Float32Array(len);
+        const varAcc = new Float32Array(len);
+
+        for (let i=0;i<len;i++){
+          const x = xs + i*step;
+
+          // average luminance over stripe height, and estimate vertical variance
+          let sum = 0;
+          let sumSq = 0;
+          let n = 0;
+
+          for (let yy=0; yy<stripeH; yy+=2){
+            const y = stripeY + yy;
+            const p = (y*imgW + x) * 4;
+            const lum = toGray(data[p], data[p+1], data[p+2]);
+            sum += lum;
+            sumSq += lum*lum;
+            n++;
+          }
+          const mean = sum / Math.max(1,n);
+          const varr = (sumSq / Math.max(1,n)) - mean*mean;
+
+          profile[i] = mean;
+          varAcc[i] = varr;
+        }
+
+        const sm = smooth1D(profile, PB.smoothWin);
+
+        // boundary search between fractions
+        const bMin = Math.floor(len * PB.boundaryMinFrac);
+        const bMax = Math.floor(len * PB.boundaryMaxFrac);
+
+        const win = Math.max(4, Math.floor(10 / step)); // ~10px neighborhood
+        let localBest = { score: -1, bi: -1, diff: 0, noise: 999 };
+
+        for (let bi=bMin; bi<=bMax; bi++){
+          const l0 = Math.max(0, bi - win);
+          const l1 = bi - 1;
+          const r0 = bi + 1;
+          const r1 = Math.min(len-1, bi + win);
+
+          if (l1 - l0 < 2 || r1 - r0 < 2) continue;
+
+          let ls=0, ln=0, rs=0, rn=0;
+          let lVar=0, rVar=0;
+
+          for (let i=l0;i<=l1;i++){ ls += sm[i]; lVar += varAcc[i]; ln++; }
+          for (let i=r0;i<=r1;i++){ rs += sm[i]; rVar += varAcc[i]; rn++; }
+
+          const lm = ls/ln;
+          const rm = rs/rn;
+          const diff = Math.abs(lm - rm);
+
+          if (diff < PB.minDiff) continue;
+
+          // noise estimate: lower is better
+          const noise = Math.sqrt((lVar/ln + rVar/rn) * 0.5);
+
+          // score: step strength minus noise penalty
+          const sc = (diff / 255) - (noise / 255) * 0.35;
+
+          if (sc > localBest.score) localBest = { score: sc, bi, diff, noise };
+        }
+
+        if (localBest.score > best.score) {
+          const boundaryX = (xs - rx) + localBest.bi * step; // relative to rect
+          best = {
+            score: localBest.score,
+            boundaryX,
+            diff: localBest.diff,
+            bar: {
+              x: xs - rx,
+              y: stripeY - ry,
+              w: xe - xs,
+              h: stripeH,
+              boundaryX: boundaryX
+            }
+          };
+        }
+      }
+    }
+
+    const ok = best.score >= PB.minScore;
+    return { ok, score: best.score, boundaryX: best.boundaryX, bar: best.bar, diff: best.diff };
+  }
+
+  // Choose best candidate in tile by (rectScore + progressScore*weight) with progress gating.
+  function pickBestProgressCandidate(tileImg){
+    const candidates = findRectangleCandidatesInTile(tileImg);
+    if (!candidates.length) return null;
+
+    const weight = 0.85; // progress signature is the discriminating feature; give it real influence.
+    let best = null;
+
+    for (const r of candidates){
+      const pb = scoreProgressBarInRect(tileImg, r);
+      if (!pb.ok) continue;
+
+      const combined = r.rectScore + pb.score * weight;
+      const cur = {
+        rect: { x: r.x, y: r.y, w: r.w, h: r.h },
+        rectScore: r.rectScore,
+        pbScore: pb.score,
+        combinedScore: combined,
+        pb
+      };
+
+      if (!best || cur.combinedScore > best.combinedScore) best = cur;
+    }
+
+    return best;
   }
 
   // Incremental scan cursor
@@ -355,7 +590,7 @@
       // Prefer TOP if it has any ok candidate, unless bottom beats it by a lot.
       let best = scan.bestTop || scan.bestBottom || null;
       if (scan.bestTop && scan.bestBottom) {
-        if (scan.bestBottom.score > scan.bestTop.score + RECT.topBias) best = scan.bestBottom;
+        if (scan.bestBottom.combinedScore > scan.bestTop.combinedScore + RECT.topBias) best = scan.bestBottom;
         else best = scan.bestTop;
       }
       return { done: true, hit: best };
@@ -363,11 +598,11 @@
 
     const half = halves[scan.halfIdx];
 
-    // If finished this half (ty past end)
+    // If finished this half
     if (scan.ty >= half.y1) {
       scan.halfIdx++;
       if (scan.halfIdx < halves.length) {
-        scan.ty = halves[scan.halfIdx].y0;
+        scan.ty = scan.halves[scan.halfIdx].y0;
         scan.tx = 0;
       }
       return { done: false, hit: null };
@@ -393,40 +628,72 @@
       return { done: false, hit: null };
     }
 
-    const r = findBestRectangleInTile(cap.img);
+    const best = pickBestProgressCandidate(cap.img);
 
-    drawRegionPreview(
-      cap.img,
-      `SCAN ${half.name} tile#${scan.tileIndex} (${tx},${ty}) score=${r.score.toFixed(3)}`,
-      r.ok ? { x: r.x, y: r.y, w: r.w, h: r.h } : null,
-      r.ok ? "orange" : null
-    );
+    if (best) {
+      drawRegionPreview(
+        cap.img,
+        `SCAN ${half.name} tile#${scan.tileIndex} rect=${best.rectScore.toFixed(3)} pb=${best.pbScore.toFixed(3)} comb=${best.combinedScore.toFixed(3)}`,
+        best.rect,
+        "orange",
+        { bar: best.pb.bar }
+      );
 
-    if (r.ok) {
-      const hit = { score: r.score, absX: tx + r.x, absY: ty + r.y, w: r.w, h: r.h, half: half.name };
+      const hit = {
+        half: half.name,
+        score: best.combinedScore,
+        rectScore: best.rectScore,
+        pbScore: best.pbScore,
+        absX: tx + best.rect.x,
+        absY: ty + best.rect.y,
+        w: best.rect.w,
+        h: best.rect.h,
+        pb: best.pb
+      };
+
       if (half.name === "TOP") {
         if (!scan.bestTop || hit.score > scan.bestTop.score) scan.bestTop = hit;
       } else {
         if (!scan.bestBottom || hit.score > scan.bestBottom.score) scan.bestBottom = hit;
       }
+    } else {
+      drawRegionPreview(
+        cap.img,
+        `SCAN ${half.name} tile#${scan.tileIndex} (no progress-bar candidate)`,
+        null,
+        null,
+        null
+      );
     }
 
     return { done: false, hit: null };
   }
 
   // ------------------------------------------------------------
-  // Stage B: learn anchor from detected rectangle
+  // Stage B: 2-frame confirmation + learn anchor
   // ------------------------------------------------------------
-  function learnAnchorFromRect(hit){
+  function computeBoundaryFromAbsRect(absRect){
+    const cap = captureRect(absRect);
+    if (!cap.img) return null;
+
+    // Run detector on full captured rect as a tile; force candidate to whole region.
+    const pb = scoreProgressBarInRect(cap.img, { x: 0, y: 0, w: absRect.w, h: absRect.h });
+    if (!pb.ok) return null;
+
+    return { boundaryX: pb.boundaryX, pbScore: pb.score, pb, img: cap.img };
+  }
+
+  function learnAnchorFromAbsRect(absRect){
     const rs = getRsSize();
     if (!rs.w || !rs.h) return false;
 
+    // Capture a padded region around the progress dialog for a stable anchor.
     const padL = 30, padT = 30, padR = 30, padB = 30;
 
-    let ax = hit.absX - padL;
-    let ay = hit.absY - padT;
-    let aw = hit.w + padL + padR;
-    let ah = hit.h + padT + padB;
+    let ax = absRect.x - padL;
+    let ay = absRect.y - padT;
+    let aw = absRect.w + padL + padR;
+    let ah = absRect.h + padT + padB;
 
     ax = clamp(ax, 0, rs.w - 1);
     ay = clamp(ay, 0, rs.h - 1);
@@ -445,10 +712,57 @@
     dbg(JSON.stringify({
       learned: true,
       anchor: { x: ax, y: ay, w: aw, h: ah },
-      rect: hit
+      rect: absRect
     }, null, 2));
 
     return true;
+  }
+
+  function confirmThenLearn(hit, doneCb){
+    // First frame boundary
+    const absRect = { x: hit.absX, y: hit.absY, w: hit.w, h: hit.h };
+    const b1 = computeBoundaryFromAbsRect(absRect);
+
+    if (!b1) {
+      dbg(JSON.stringify({ stage: "pb2", ok: false, reason: "no boundary on frame1", hit }, null, 2));
+      doneCb(false);
+      return;
+    }
+
+    // Second frame boundary after delay
+    schedule(PB2.delayMs, () => {
+      if (!running) { doneCb(false); return; }
+
+      const b2 = computeBoundaryFromAbsRect(absRect);
+      if (!b2) {
+        dbg(JSON.stringify({ stage: "pb2", ok: false, reason: "no boundary on frame2", hit }, null, 2));
+        doneCb(false);
+        return;
+      }
+
+      const move = Math.abs((b2.boundaryX ?? 0) - (b1.boundaryX ?? 0));
+      const okMove = move >= PB2.minBoundaryMovePx;
+
+      const okStrong = (b1.pbScore >= PB2.strongSingleFrameScore) || (b2.pbScore >= PB2.strongSingleFrameScore);
+
+      drawRegionPreview(
+        b2.img,
+        `CONFIRM pb1=${b1.pbScore.toFixed(3)} pb2=${b2.pbScore.toFixed(3)} move=${move.toFixed(1)}px ${okMove || okStrong ? "OK" : "MISS"}`,
+        { x: 0, y: 0, w: absRect.w, h: absRect.h },
+        okMove || okStrong ? "lime" : "red",
+        { bar: b2.pb.bar }
+      );
+
+      if (!(okMove || okStrong)) {
+        dbg(JSON.stringify({ stage: "pb2", ok: false, move, b1: b1.pbScore, b2: b2.pbScore, hit }, null, 2));
+        doneCb(false);
+        return;
+      }
+
+      const learned = learnAnchorFromAbsRect(absRect);
+      dbg(JSON.stringify({ stage: "pb2", ok: true, move, learned, hit }, null, 2));
+      doneCb(learned);
+    });
   }
 
   // ------------------------------------------------------------
@@ -515,13 +829,13 @@
   }
 
   // ------------------------------------------------------------
-  // Main loop
+  // Main auto-find loop
   // ------------------------------------------------------------
   function runAutoFindLoop(){
     if (!running) return;
 
     setMode("Running");
-    setStatus("Auto-finding (rectangle detect)…");
+    setStatus("Auto-finding (progress window)…");
     setLock("none");
     setProgress("—");
 
@@ -536,36 +850,36 @@
 
       const step = stageAStepOneTile();
 
-      // Still scanning
       if (!step.done) {
-        // 0ms can still be okay, but 15–25ms keeps UI very responsive.
         schedule(15, tick);
         return;
       }
 
-      // Done scanning all tiles
       const hit = step.hit;
       if (!hit) {
-        setStatus("Auto-find: no rectangle yet (retrying)...");
-        dbg(JSON.stringify({ stage: "rect", ok: false, note: "Retry in 600ms" }, null, 2));
+        setStatus("Auto-find: no progress-window candidate (retrying)...");
+        dbg(JSON.stringify({ stage: "scan", ok: false, note: "Retry in 600ms" }, null, 2));
         schedule(600, runAutoFindLoop);
         return;
       }
 
-      setStatus(`Rectangle hit (${hit.half}) score ${hit.score.toFixed(3)}. Learning anchor…`);
+      setStatus(`Candidate found (${hit.half}) rect=${hit.rectScore.toFixed(3)} pb=${hit.pbScore.toFixed(3)}. Confirming…`);
 
-      const ok = learnAnchorFromRect(hit);
-      if (!ok) {
-        setStatus("Auto-find: capture failed (retrying)...");
+      confirmThenLearn(hit, (okLearned) => {
+        if (!running) return;
+
+        if (!okLearned) {
+          setStatus("Confirm/learn failed (retrying)...");
+          schedule(600, runAutoFindLoop);
+          return;
+        }
+
+        setStatus("Verifying learned anchor…");
+        if (verifySavedAnchorOnce()) return;
+
+        setStatus("Learned anchor verify failed (retrying)...");
         schedule(600, runAutoFindLoop);
-        return;
-      }
-
-      setStatus("Verifying learned anchor…");
-      if (verifySavedAnchorOnce()) return;
-
-      setStatus("Learned anchor verify failed (retrying)...");
-      schedule(600, runAutoFindLoop);
+      });
     };
 
     schedule(0, tick);
@@ -620,6 +934,6 @@
     app: { version: APP_VERSION, build: BUILD_ID },
     savedLock: loadJSON(LS_LOCK_POS),
     hasAnchor: !!loadJSON(LS_ANCHOR),
-    note: "Rectangle mode: incremental scan so preview matches scan order; learns anchor once, then Start verifies and stops scanning."
+    note: "Auto-find uses rectangle+progress-bar signature; confirms via 2-frame boundary movement before learning."
   }, null, 2));
 })();
