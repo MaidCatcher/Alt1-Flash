@@ -243,7 +243,7 @@
     minScore: 0.010,
 
     // Prefer TOP if close.
-    topBias: 0.006,
+    topBias: 0.050,
 
     // Keep top candidates per tile (rect score)
     keepTopN: 8
@@ -587,12 +587,8 @@
 
     // If finished all halves
     if (scan.halfIdx >= halves.length) {
-      // Prefer TOP if it has any ok candidate, unless bottom beats it by a lot.
-      let best = scan.bestTop || scan.bestBottom || null;
-      if (scan.bestTop && scan.bestBottom) {
-        if (scan.bestBottom.combinedScore > scan.bestTop.combinedScore + RECT.topBias) best = scan.bestBottom;
-        else best = scan.bestTop;
-      }
+      // TOP-first policy: if we found any TOP candidate, ignore bottom entirely.
+      const best = scan.bestTop || scan.bestBottom || null;
       return { done: true, hit: best };
     }
 
@@ -600,6 +596,12 @@
 
     // If finished this half
     if (scan.ty >= half.y1) {
+      // Early stop: after TOP half, if we have a TOP candidate, stop scanning.
+      if (half.name === "TOP" && scan.bestTop) {
+        scan.halfIdx = halves.length;
+        return { done: true, hit: scan.bestTop };
+      }
+
       scan.halfIdx++;
       if (scan.halfIdx < halves.length) {
         scan.ty = scan.halves[scan.halfIdx].y0;
@@ -687,14 +689,21 @@
     const rs = getRsSize();
     if (!rs.w || !rs.h) return false;
 
-    // Capture a padded region around the progress dialog for a stable anchor.
-    const padL = 30, padT = 30, padR = 30, padB = 30;
+    // Learn a SMALL, STABLE anchor inside the dialog frame (avoid moving bar/text).
+    // This dramatically improves verify stability.
+    const AN = {
+      w: 240,
+      h: 70,
+      offX: 18,   // from dialog left
+      offY: 10    // from dialog top
+    };
 
-    let ax = absRect.x - padL;
-    let ay = absRect.y - padT;
-    let aw = absRect.w + padL + padR;
-    let ah = absRect.h + padT + padB;
+    let ax = absRect.x + AN.offX;
+    let ay = absRect.y + AN.offY;
+    let aw = AN.w;
+    let ah = AN.h;
 
+    // Clamp to screen
     ax = clamp(ax, 0, rs.w - 1);
     ay = clamp(ay, 0, rs.h - 1);
     aw = clamp(aw, 20, rs.w - ax);
@@ -706,13 +715,14 @@
     const bytes = cropRGBA(cap.img, 0, 0, aw, ah);
     saveJSON(LS_ANCHOR, { w: aw, h: ah, rgbaBase64: bytesToBase64(bytes) });
 
+    // Save anchor origin (not the whole dialog)
     saveJSON(LS_LOCK_POS, { x: ax, y: ay });
     updateSavedLockLabel();
 
     dbg(JSON.stringify({
       learned: true,
       anchor: { x: ax, y: ay, w: aw, h: ah },
-      rect: absRect
+      fromDialog: absRect
     }, null, 2));
 
     return true;
@@ -769,10 +779,10 @@
   // Stage C: verify saved anchor once
   // ------------------------------------------------------------
   const VERIFY = {
-    pad: 320,
+    pad: 260,
     step: 2,
     tolerance: 55,
-    minAccept: 0.72
+    minAccept: 0.68
   };
 
   function verifySavedAnchorOnce(){
