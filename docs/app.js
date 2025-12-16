@@ -135,16 +135,19 @@
   setStatus("Fallback scan…");
   dbg("Rectangle detector running");
 
-  // Ensure scan flags are enabled
-  window.scanning = true;
-  window.autoFinding = true;
-
-  // Kick the actual scan loop if it exists
-  if (typeof window.scanTick === "function") {
-    window.scanTick();
-  } else if (typeof window.runScanLoop === "function") {
-    window.runScanLoop();
+  // Trigger the SAME logic as clicking "Auto find"
+  if (autoFindBtn && typeof autoFindBtn.onclick === "function") {
+    autoFindBtn.onclick();
+    return;
   }
+
+  // Fallback: try Start button logic
+  if (startBtn && typeof startBtn.onclick === "function") {
+    startBtn.onclick();
+    return;
+  }
+
+  dbg("ERROR: No scan entry point found");
 }
 
 
