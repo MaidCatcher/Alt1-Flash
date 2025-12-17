@@ -534,6 +534,20 @@
         pushBest(scanCursor.best, bestInTile);
       }
 
+      // Record diagnostics for this tile so we can see how the scan behaves.
+      try {
+        window.progflashCaptureDiag = Object.assign({}, window.progflashCaptureDiag || {}, {
+          lastScan: {
+            preset: area.name,
+            tileIndex: scanCursor.tileIndex,
+            tileRect: { x: tx, y: ty, w: tw, h: th },
+            candidateCount: candidates.length,
+            bestComb: bestInTile ? bestInTile.comb : 0,
+            bestPb: bestInTile ? bestInTile.pb : 0
+          }
+        });
+      } catch {}
+
       drawImageScaled(
         img,
         `SCAN tile#${scanCursor.tileIndex} preset=${area.name} best=${bestInTile ? bestInTile.comb.toFixed(2) : "—"} overlay=${overlayEnabled() ? "ON" : "OFF"}`,
@@ -554,6 +568,15 @@
     if (scanCursor.ty >= area.y1) {
       setStatus("Auto find timed out (try changing Scan area preset)");
       scanActive = false;
+      try {
+        window.progflashCaptureDiag = Object.assign({}, window.progflashCaptureDiag || {}, {
+          lastScanEnd: {
+            preset: area.name,
+            reason: "area_exhausted",
+            tilesScanned: scanCursor.tileIndex
+          }
+        });
+      } catch {}
       return;
     }
 
