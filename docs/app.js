@@ -36,7 +36,7 @@
   const canvas = $("previewCanvas");
   const ctx = canvas ? canvas.getContext("2d", { willReadFrequently: true }) : null;
 
-  const APP_VERSION = "0.6.23";
+  const APP_VERSION = "0.6.24";
   const BUILD_ID = "final-" + Date.now();
 
   function setStatus(v) { if (statusEl) statusEl.textContent = v; }
@@ -102,6 +102,10 @@
     const r = load(LS_DIALOG);
     return r && typeof r.x==="number" ? r : null;
   }
+
+  // Expose for debugging / avoid scope issues in some Alt1 builds
+  window._pf_loadDialogRect = loadDialogRect;
+  window._pf_saveDialogRect = saveDialogRect;
 }
 
   function bytesToB64(bytes) {
@@ -667,7 +671,7 @@
       if (!running || scanActive) return;
 
       // If locked, update progress by sampling the dialog rect
-      const drect = loadDialogRect();
+      const drect = (window._pf_loadDialogRect ? window._pf_loadDialogRect() : null);
       if (drect) {
         const img = captureRegion(drect.x, drect.y, drect.w, drect.h);
         if (img) {
@@ -925,7 +929,7 @@
   if (autoFindBtn) autoFindBtn.onclick = autoFind;
   if (clearLockBtn) clearLockBtn.onclick = clearLock;
   if (testFlashBtn) testFlashBtn.onclick = () => {
-    const d=loadDialogRect();
+    const d=(window._pf_loadDialogRect ? window._pf_loadDialogRect() : null);
     if(d){ overlayRectOnScreen(d.x,d.y,d.w,d.h,900); return; }
     const rs=getRsSize();
     overlayRectOnScreen(Math.floor(rs.w*0.25), Math.floor(rs.h*0.25), Math.floor(rs.w*0.5), Math.floor(rs.h*0.15), 900);
