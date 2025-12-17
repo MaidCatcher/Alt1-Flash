@@ -230,12 +230,17 @@
     { w: 480, h: 180 }
   ];
 
-  const PB = { minScore: 0.20 };
+  // Progress-bar scoring thresholds.
+  // If it struggles to find the bar, try lowering minScore slightly.
+  const PB = { minScore: 0.14 };
 
   const SCAN = {
-    step: 12,
-    shortlist: 5,
-    earlyExitComb: 0.88,
+    // Smaller step -> denser search, better chance to hit the bar at cost of CPU.
+    step: 8,
+    // Keep a few more good candidates around so we don't miss near-misses.
+    shortlist: 8,
+    // Combined score needed to trigger an "early confirm" on a tile.
+    earlyExitComb: 0.82,
     confirmDelayMs: 180
   };
 
@@ -272,8 +277,10 @@
 
   function scoreProgressBar(sub) {
     const w = sub.width, h = sub.height;
-    const y0 = Math.floor(h * 0.45);
-    const y1 = Math.floor(h * 0.70);
+    // Vertical band where we expect the green bar.
+    // Widened a bit to reduce misses on slightly shifted dialogs.
+    const y0 = Math.floor(h * 0.40);
+    const y1 = Math.floor(h * 0.75);
 
     let bestRow = { score: 0, y: Math.floor(h * 0.55), xEdge: 0 };
 
@@ -299,7 +306,7 @@
   function scoreCancelBand(sub) {
     const w = sub.width, h = sub.height;
     const y0 = Math.floor(h * 0.78);
-    const y1 = Math.floor(h * 0.95);
+    const y1 = Math.floor(h * 0.96);
 
     let hits = 0, total = 0;
     for (let y = y0; y < y1; y += 2) {
@@ -393,13 +400,30 @@
         const close2 = scoreCloseX(img2);
 
         const pbFracY = pb2.y / Math.max(1, (img2.height - 1));
-        const inBand = (pbFracY >= 0.45 && pbFracY <= 0.72);
+        // Slightly wider vertical band and looser movement threshold.
+        const inBand = (pbFracY >= 0.40 && pbFracY <= 0.78);
 
         const ok =
           (pb2.score >= PB.minScore) &&
-          (moved >= 2 || pb2.score >= 0.30) &&
-          (cancel2 >= 0.07 || close2 >= 0.07) &&
+          (moved >= 1 || pb2.score >= 0.22) &&
+          (cancel2 >= 0.05 || close2 >= 0.05) &&
           inBand;
+
+        // Expose extra diagnostics for tricky cases.
+        try {
+          window.progflashCaptureDiag = Object.assign({}, window.progflashCaptureDiag || {}, {
+            lastConfirm: {
+              ok,
+              moved,
+              pb1: pb1.score,
+              pb2: pb2.score,
+              cancel2,
+              close2,
+              pbFracY,
+              minScore: PB.minScore
+            }
+          });
+        } catch {}
 
         resolve({ ok, pb: pb2.score, moved, cancel: cancel2, close: close2, img2 });
       }, SCAN.confirmDelayMs);
