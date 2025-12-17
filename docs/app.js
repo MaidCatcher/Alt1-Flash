@@ -682,15 +682,15 @@
     const dlg = load(LS_DIALOG);
     if (dlg && typeof dlg.x === "number" && typeof dlg.y === "number" &&
         typeof dlg.w === "number" && typeof dlg.h === "number") {
-      overlayRectRs(dlg.x, dlg.y, dlg.w, dlg.h, 1000);
-      setStatus("Showing locked dialog overlay");
+      const ok = overlayRectRs(dlg.x, dlg.y, dlg.w, dlg.h, 1000);
+      setStatus(ok ? "Showing locked dialog overlay" : "Overlay failed (check Alt1 overlay permission)");
       return;
     }
     const lock = load(LS_LOCK);
     if (lock && typeof lock.x === "number" && typeof lock.y === "number") {
       // Fallback: draw a small box around the lock point if we don't have the dialog rect.
-      overlayRectRs(lock.x - 40, lock.y - 20, 80, 40, 1000);
-      setStatus("Showing lock point overlay");
+      const ok = overlayRectRs(lock.x - 40, lock.y - 20, 80, 40, 1000);
+      setStatus(ok ? "Showing lock point overlay" : "Overlay failed (check Alt1 overlay permission)");
       return;
     }
     setStatus("No lock/dialog stored to show");
