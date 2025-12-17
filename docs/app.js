@@ -36,7 +36,7 @@
   const canvas = $("previewCanvas");
   const ctx = canvas ? canvas.getContext("2d", { willReadFrequently: true }) : null;
 
-  const APP_VERSION = "0.6.24";
+  const APP_VERSION = "0.6.25";
   const BUILD_ID = "final-" + Date.now();
 
   function setStatus(v) { if (statusEl) statusEl.textContent = v; }
@@ -636,7 +636,8 @@
 
           // Screen overlay: draw the confirmed dialog on the RS client
           overlayRectOnScreen(c.absRect.x, c.absRect.y, c.absRect.w, c.absRect.h, 1200);
-          saveDialogRect(c.absRect);
+          if (window._pf_saveDialogRect) window._pf_saveDialogRect(c.absRect);
+          try { save(LS_DIALOG, c.absRect); } catch {}
 
 
     // Screen overlay: draw dialog rectangle if we know dialog geometry
@@ -644,7 +645,8 @@
       const dialogX = ax - (s.Ax || 0);
       const dialogY = ay - (s.Ay || 0);
       overlayRectOnScreen(dialogX, dialogY, s.dialogW, s.dialogH, 1200);
-      saveDialogRect({x:dialogX,y:dialogY,w:s.dialogW,h:s.dialogH});
+      if (window._pf_saveDialogRect) window._pf_saveDialogRect({x:dialogX,y:dialogY,w:s.dialogW,h:s.dialogH});
+      try { save(LS_DIALOG, {x:dialogX,y:dialogY,w:s.dialogW,h:s.dialogH}); } catch {}
     }
 
 
@@ -672,8 +674,21 @@
 
       // If locked, update progress by sampling the dialog rect
       const drect = (window._pf_loadDialogRect ? window._pf_loadDialogRect() : null);
-      if (drect) {
-        const img = captureRegion(drect.x, drect.y, drect.w, drect.h);
+      let drect2 = drect;
+
+      // If we are locked but dialog rect missing, reconstruct from saved lock + anchors
+      if (!drect2) {
+        const lock = load(LS_LOCK);
+        const s = load(LS_MULTI);
+        if (lock && s && s.dialogW && s.dialogH && typeof s.Ax === "number" && typeof s.Ay === "number") {
+          drect2 = { x: (lock.x - s.Ax)|0, y: (lock.y - s.Ay)|0, w: s.dialogW|0, h: s.dialogH|0 };
+          if (window._pf_saveDialogRect) window._pf_saveDialogRect(drect2);
+          try { save(LS_DIALOG, drect2); } catch {}
+        }
+      }
+
+      if (drect2) {
+        const img = captureRegion(drect2.x, drect2.y, drect2.w, drect2.h);
         if (img) {
           const pb = scoreProgressBar(img);
           const pct = clamp(pb.xEdge / Math.max(1, (img.width - 1)), 0, 1);
@@ -686,9 +701,9 @@
           window._pf_lastPct = pct;
 
           if (pct >= 0.985) {
-            overlayRectOnScreen(drect.x, drect.y, drect.w, drect.h, 900);
+            overlayRectOnScreen(drect2.x, drect2.y, drect2.w, drect2.h, 900);
           } else if (last !== null && Math.abs(pct - last) >= 0.12) {
-            overlayRectOnScreen(drect.x, drect.y, drect.w, drect.h, 450);
+            overlayRectOnScreen(drect2.x, drect2.y, drect2.w, drect2.h, 450);
           }
 
           // Preview with A/B/C overlay if available
