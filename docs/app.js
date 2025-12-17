@@ -132,6 +132,21 @@
     return overlayRectAbs(o.x + rsX, o.y + rsY, w, h, ms);
   }
 
+  function overlayTextAbs(absX, absY, text, color = 0xff0000, ms = 900) {
+    try {
+      if (typeof alt1.overLayText === "function") { alt1.overLayText(text, color, absX, absY, ms); return true; }
+      if (typeof alt1.overlayText === "function") { alt1.overlayText(text, color, absX, absY, ms); return true; }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  function overlayTextRs(rsX, rsY, text, color = 0xff0000, ms = 900) {
+    const o = getRsOffset();
+    return overlayTextAbs(o.x + rsX, o.y + rsY, text, color, ms);
+  }
+
   // ---------- Preview drawing ----------
   function drawImageScaled(img, label, overlayRects) {
     if (!ctx || !canvas) return;
@@ -739,7 +754,14 @@
       [{ x: 10, y: 10, w: 120, h: 60, color: "lime", label: "test" }]
     );
 
-    if (now) overlayRectRs(20, 20, 140, 70, 900);
+    if (now) {
+      // Try both a small rectangle and a red "ProgFlash" text as overlay test.
+      overlayRectRs(20, 20, 140, 70, 900);
+      const rs = getRsSize();
+      const cx = Math.floor(rs.w / 2) - 80;
+      const cy = Math.floor(rs.h * 0.25);
+      overlayTextRs(cx, cy, "ProgFlash", 0xff0000, 900);
+    }
   }
 
   // ---------- Init ----------
