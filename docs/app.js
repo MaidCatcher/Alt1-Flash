@@ -325,6 +325,8 @@
   }
 
   function scoreCancelBand(sub) {
+    // Original RS dialogs often had an orange "Cancel" bar; on many themes this is now grey.
+    // We keep this function for diagnostics, but no longer depend on it for locking.
     const w = sub.width, h = sub.height;
     const y0 = Math.floor(h * 0.78);
     const y1 = Math.floor(h * 0.96);
@@ -369,7 +371,8 @@
     const cancel = scoreCancelBand(sub);
     const close = scoreCloseX(sub);
 
-    const comb = pb.score * 0.75 + Math.max(cancel * 0.6, close * 0.9) * 0.25;
+    // Rely primarily on the progress bar + close "X". Cancel color varies a lot between themes.
+    const comb = pb.score * 0.8 + (close * 0.2);
     return { pb: pb.score, pbY: pb.y, pbXEdge: pb.xEdge, cancel, close, comb };
   }
 
@@ -453,7 +456,9 @@
         const ok =
           (pb2.score >= PB.minScore) &&
           (moved >= 1 || pb2.score >= 0.22) &&
-          (cancel2 >= 0.05 || close2 >= 0.05) &&
+          // Require a reasonable fraction of bright pixels in the close "X" area,
+          // but don't depend on any specific cancel color.
+          (close2 >= 0.05) &&
           inBand;
 
         // Expose extra diagnostics for tricky cases.
