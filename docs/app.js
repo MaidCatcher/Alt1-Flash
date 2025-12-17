@@ -44,6 +44,7 @@
   const LS_LOCK   = "progflash.lockPos";         // {x,y} RS-relative anchor A
   const LS_MULTI  = "progflash.multiAnchorABC";  // learned A/B/C needles + offsets + dialog dims
   const LS_DIALOG = "progflash.dialogRect";      // {x,y,w,h} RS-relative dialog rect
+  const LS_BAR    = "progflash.barTemplate";     // per-user learned progress bar template
   const LS_SCAN   = "progflash.scanPreset";      // "top|mid|bot|full"
   const LS_OVL    = "progflash.overlayEnabled";  // "1" or "0"
 
@@ -421,6 +422,58 @@
     return best;
   }
 
+  // Try to locate the dialog by matching a learned bar template first.
+  function autoFindWithBarTemplate() {
+    const tpl = load(LS_BAR);
+    if (!tpl || !tpl.w || !tpl.h || !tpl.b64) return null;
+
+    const rs = getRsSize();
+    const hay = captureRegion(0, 0, rs.w, rs.h);
+    if (!hay) return null;
+
+    const bytes = b64ToBytes(tpl.b64);
+    const needle = makeNeedle(tpl.w, tpl.h, bytes);
+
+    const match = window.findAnchor(hay, needle, {
+      minScore: 0.70,
+      step: 2,
+      ignoreAlphaBelow: 0
+    });
+
+    if (!match || !match.ok) return null;
+
+    const barX = match.x;
+    const barY = match.y;
+
+    // Recover dialog rect from bar position and stored offsets.
+    const dlgX = barX + (typeof tpl.dxDialog === "number" ? tpl.dxDialog : -tpl.rel.x);
+    const dlgY = barY + (typeof tpl.dyDialog === "number" ? tpl.dyDialog : -tpl.rel.y);
+    const dlgW = tpl.dialogW || (tpl.rel && tpl.rel.w ? tpl.rel.w * 3 : 520);
+    const dlgH = tpl.dialogH || (tpl.rel && tpl.rel.h ? tpl.rel.h * 4 : 200);
+
+    const dialogRect = {
+      x: clamp(dlgX, 0, Math.max(0, rs.w - 1)),
+      y: clamp(dlgY, 0, Math.max(0, rs.h - 1)),
+      w: Math.min(dlgW, rs.w),
+      h: Math.min(dlgH, rs.h)
+    };
+
+    // For preview: capture just around the candidate dialog.
+    const imgDialog = captureRegion(dialogRect.x, dialogRect.y, dialogRect.w, dialogRect.h);
+
+    try {
+      window.progflashCaptureDiag = Object.assign({}, window.progflashCaptureDiag || {}, {
+        lastBarTemplateMatch: {
+          score: match.score,
+          bar: { x: barX, y: barY, w: tpl.w, h: tpl.h },
+          dialogRect
+        }
+      });
+    } catch {}
+
+    return { dialogRect, imgDialog, matchScore: match.score };
+  }
+
   function scanTileForCandidates(tileImg) {
     const out = [];
     const tw = tileImg.width, th = tileImg.height;
@@ -530,6 +583,41 @@
       dxC: (Cx - Ax), dyC: (Cy - Ay),
       dialogW: img.width, dialogH: img.height,
       Ax, Ay
+    });
+
+    return true;
+  }
+
+  // Learn a per-user bar template and dialog offsets from a confirmed dialog rect.
+  function learnBarTemplateFromDialog(dialogRsRect) {
+    const img = captureRegion(dialogRsRect.x, dialogRsRect.y, dialogRsRect.w, dialogRsRect.h);
+    if (!img) return false;
+
+    const pb = scoreProgressBar(img);
+    if (!pb || pb.score < PB.minScore) return false;
+
+    // Define a reasonably tight bar rectangle around the best progress-bar row.
+    const bw = Math.max(80, Math.floor(img.width * 0.80));
+    const bx = Math.floor((img.width - bw) / 2);
+    const bh = 14;
+    const by = clamp(pb.y - Math.floor(bh / 2), 0, Math.max(0, img.height - bh));
+
+    const bytes = cropRGBA(img, bx, by, bw, bh);
+
+    save(LS_BAR, {
+      w: bw,
+      h: bh,
+      b64: bytesToB64(bytes),
+      // Dialog relative location of the bar.
+      rel: { x: bx, y: by, w: bw, h: bh },
+      dialogW: img.width,
+      dialogH: img.height,
+      // Offsets to recover the dialog rect from a future bar match.
+      dxDialog: dialogRsRect.x - (dialogRsRect.x + bx),
+      dyDialog: dialogRsRect.y - (dialogRsRect.y + by),
+      // Fractional vertical position of the bar inside the dialog for diagnostics.
+      pbFracY: pb.y / Math.max(1, img.height - 1),
+      learnedAt: Date.now()
     });
 
     return true;
@@ -655,8 +743,49 @@
   async function startAutoFindInternal() {
     if (!running) return;
     scanActive = true;
-    setStatus("Auto-finding (single screen scan)...");
     setProgress("—");
+
+    // Phase 1: if we have a learned bar template, try that first.
+    setStatus("Auto-finding (bar template)...");
+    const tplHit = autoFindWithBarTemplate();
+    if (tplHit && tplHit.dialogRect && tplHit.matchScore >= 0.72) {
+      const dlg = tplHit.dialogRect;
+      const conf = await confirmCandidate({ absRect: dlg, relRect: { x: 0, y: 0, w: dlg.w, h: dlg.h }, pb: 1, comb: 1 });
+
+      if (!running || !scanActive) {
+        scanActive = false;
+        return;
+      }
+
+      if (conf && conf.ok) {
+        save(LS_DIALOG, dlg);
+        learnTripleAnchorFromDialog(dlg);
+        learnBarTemplateFromDialog(dlg);
+
+        const s = load(LS_MULTI);
+        if (s && typeof s.Ax === "number" && typeof s.Ay === "number") {
+          save(LS_LOCK, { x: (dlg.x + s.Ax)|0, y: (dlg.y + s.Ay)|0 });
+          updateSavedLockLabel();
+          setLock(`x=${(dlg.x + s.Ax)|0}, y=${(dlg.y + s.Ay)|0}`);
+        } else {
+          setLock("learned");
+        }
+
+        setProgress("locked");
+        setStatus("Locked (from bar template)");
+        scanActive = false;
+
+        drawImageScaled(conf.img2, `CONFIRMED (template)`,
+          [{ x: 0, y: 0, w: dlg.w, h: dlg.h, color: "lime", label: "dialog" }]
+        );
+
+        if (overlayEnabled()) overlayRectRs(dlg.x, dlg.y, dlg.w, dlg.h, 900);
+        return;
+      }
+    }
+
+    // Phase 2: fall back to generic single-screen scan.
+    setStatus("Auto-finding (single screen scan)...");
 
     const rs = getRsSize();
     const img = captureRegion(0, 0, rs.w, rs.h);
@@ -702,6 +831,7 @@
     if (conf && conf.ok) {
       save(LS_DIALOG, best.absRect);
       learnTripleAnchorFromDialog(best.absRect);
+      learnBarTemplateFromDialog(best.absRect);
 
       const s = load(LS_MULTI);
       if (s && typeof s.Ax === "number" && typeof s.Ay === "number") {
@@ -800,6 +930,7 @@
     del(LS_LOCK);
     del(LS_MULTI);
     del(LS_DIALOG);
+    del(LS_BAR);
     updateSavedLockLabel();
     setLock("none");
     setStatus("Cleared");
