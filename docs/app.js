@@ -1,6 +1,7 @@
 // ProgFlash app_final10.js
 // Fixes from final9:
 // - captureRegion() uses RS-relative coords (matcher.js), so ALL captures/locks now operate in RS-relative space.
+// - overlays (Alt1 overLayRect / overlayRect) use SCREEN-absolute coords, so we add alt1.rsX/rsY when drawing.
 // - restores moving preview.
 // - adds "green square on screen where it's locked" (dialog rect) when locked (throttled).
 //
