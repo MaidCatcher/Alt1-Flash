@@ -373,6 +373,31 @@
     return { pb: pb.score, pbY: pb.y, pbXEdge: pb.xEdge, cancel, close, comb };
   }
 
+  // Scan a single full-screen image for the best dialog-like candidate.
+  function findBestDialogInImage(img) {
+    let best = null;
+    const iw = img.width, ih = img.height;
+
+    for (const sz of DIALOG_SIZES) {
+      const rw = Math.min(sz.w, iw);
+      const rh = Math.min(sz.h, ih);
+      if (rw < 320 || rh < 140) continue;
+
+      for (let y = 0; y <= ih - rh; y += SCAN.step) {
+        for (let x = 0; x <= iw - rw; x += SCAN.step) {
+          const s = scoreDialogCandidate(img, x, y, rw, rh);
+          const c = {
+            absRect: { x, y, w: rw, h: rh },
+            relRect: { x, y, w: rw, h: rh },
+            ...s
+          };
+          if (!best || c.comb > best.comb) best = c;
+        }
+      }
+    }
+    return best;
+  }
+
   function scanTileForCandidates(tileImg) {
     const out = [];
     const tw = tileImg.width, th = tileImg.height;
@@ -602,13 +627,80 @@
     schedule(12, scanTick);
   }
 
-  function startAutoFindInternal() {
+  async function startAutoFindInternal() {
     if (!running) return;
     scanActive = true;
-    setStatus("Auto-finding (fallback scan)...");
+    setStatus("Auto-finding (single screen scan)...");
     setProgress("—");
-    resetScan();
-    schedule(0, scanTick);
+
+    const rs = getRsSize();
+    const img = captureRegion(0, 0, rs.w, rs.h);
+    if (!img) {
+      setStatus("Auto find failed: capture error");
+      scanActive = false;
+      return;
+    }
+
+    const best = findBestDialogInImage(img);
+
+    // Record diagnostics for this one-shot scan.
+    try {
+      window.progflashCaptureDiag = Object.assign({}, window.progflashCaptureDiag || {}, {
+        lastScanOneShot: {
+          preset: "full",
+          imgSize: { w: img.width, h: img.height },
+          bestComb: best ? best.comb : 0,
+          bestPb: best ? best.pb : 0
+        }
+      });
+    } catch {}
+
+    if (!best || best.pb < PB.minScore) {
+      drawImageScaled(img, "AUTO FIND: no strong progress dialog candidate", []);
+      setStatus("No progress dialog found (try moving RS window)");
+      scanActive = false;
+      return;
+    }
+
+    drawImageScaled(
+      img,
+      `AUTO FIND candidate pb=${best.pb.toFixed(2)} comb=${best.comb.toFixed(2)}`,
+      [{ x: best.absRect.x, y: best.absRect.y, w: best.absRect.w, h: best.absRect.h, color: "orange", label: "candidate" }]
+    );
+
+    const conf = await confirmCandidate(best);
+    if (!running || !scanActive) {
+      scanActive = false;
+      return;
+    }
+
+    if (conf && conf.ok) {
+      save(LS_DIALOG, best.absRect);
+      learnTripleAnchorFromDialog(best.absRect);
+
+      const s = load(LS_MULTI);
+      if (s && typeof s.Ax === "number" && typeof s.Ay === "number") {
+        save(LS_LOCK, { x: (best.absRect.x + s.Ax)|0, y: (best.absRect.y + s.Ay)|0 });
+        updateSavedLockLabel();
+        setLock(`x=${(best.absRect.x + s.Ax)|0}, y=${(best.absRect.y + s.Ay)|0}`);
+      } else {
+        setLock("learned");
+      }
+
+      setProgress("locked");
+      setStatus("Locked (from single scan confirm)");
+      scanActive = false;
+
+      drawImageScaled(conf.img2, `CONFIRMED OK pb=${conf.pb.toFixed(2)}`,
+        [{ x: 0, y: 0, w: best.absRect.w, h: best.absRect.h, color: "lime", label: "dialog" }]
+      );
+
+      if (overlayEnabled()) overlayRectRs(best.absRect.x, best.absRect.y, best.absRect.w, best.absRect.h, 900);
+      return;
+    }
+
+    setStatus("Confirm failed (no lock)");
+    scanActive = false;
   }
 
   // ---------- Idle capture loop ----------
