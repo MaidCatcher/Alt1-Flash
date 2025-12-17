@@ -1,16 +1,15 @@
-// ProgFlash app_final10.js
-// Fixes from final9:
-// - captureRegion() uses RS-relative coords (matcher.js), so ALL captures/locks now operate in RS-relative space.
-// - overlays (Alt1 overLayRect / overlayRect) use SCREEN-absolute coords, so we add alt1.rsX/rsY when drawing.
-// - restores moving preview.
-// - adds "green square on screen where it's locked" (dialog rect) when locked (throttled).
+// ProgFlash app_final11.js
+// Changes vs final10:
+// - Scan preset dropdown is wired explicitly at init; changes take effect immediately and update debug.
+// - "Test flash" no longer calls overlay directly inside the click handler (which can minimize/focus Alt1).
+//   Instead it sets a flag; the capture loop performs the overlay on the next tick.
+// - Adds an always-updating debug line showing the *current scan rect* (RS-relative) and capture diagnostics.
 //
-// Depends on matcher.js globals:
-//   captureRegion(x,y,w,h) -> RS-relative capture
-//   findAnchor(haystack, needle, opts)
+// Coordinate spaces:
+// - captureRegion(x,y,w,h) is RS-relative (matcher.js converts to absolute for Alt1 getRegionImage).
+// - overlayRect is absolute; we convert RS-relative -> absolute by adding alt1.rsX/alt1.rsY.
 
 (() => {
-  // ---------------- DOM ----------------
   const $ = (id) => document.getElementById(id);
 
   const statusEl = $("status");
@@ -26,7 +25,7 @@
   const testFlashBtn = $("testFlashBtn");
 
   const savedLockEl = $("savedLock");
-  const scanPresetEl = $("scanPreset"); // your UI shows "Scan area:" dropdown
+  const scanPresetEl = $("scanPreset");
 
   const canvas = $("previewCanvas");
   const ctx = canvas ? canvas.getContext("2d", { willReadFrequently: true }) : null;
@@ -40,14 +39,10 @@
     dbgEl.textContent = typeof v === "string" ? v : JSON.stringify(v, null, 2);
   }
 
-  // ---------------- Storage ----------------
-  // Store everything in RS-relative coords:
-  // lockPos: anchor A top-left in RS coords.
-  // dialogRect: dialog bounds in RS coords.
   const LS_LOCK   = "progflash.lockPos";         // {x,y} RS-relative
-  const LS_MULTI  = "progflash.multiAnchorABC";  // learned patches + offsets + dialog dims
+  const LS_MULTI  = "progflash.multiAnchorABC";
   const LS_DIALOG = "progflash.dialogRect";      // {x,y,w,h} RS-relative
-  const LS_SCAN   = "progflash.scanPreset";      // "top|mid|bot|full"
+  const LS_SCAN   = "progflash.scanPreset";
 
   function save(key, obj) { try { localStorage.setItem(key, JSON.stringify(obj)); } catch {} }
   function load(key) { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } }
@@ -59,13 +54,6 @@
     savedLockEl.textContent = p ? `x=${p.x},y=${p.y}` : "none";
   }
 
-  // ---------------- RS helpers ----------------
-  function getRsSize() {
-    return { w: alt1.rsWidth || 0, h: alt1.rsHeight || 0 };
-  }
-  function getRsOffset() {
-    return { x: alt1.rsX || 0, y: alt1.rsY || 0 };
-  }
   function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
 
   function rgba(r, g, b, a = 255) {
@@ -112,11 +100,18 @@
     return out;
   }
 
-  // ---------------- Overlay on screen (ABSOLUTE) ----------------
-  function overlayRectAbs(absX, absY, w, h, ms = 1200) {
+  function getRsSize() {
+    return { w: alt1.rsWidth || 0, h: alt1.rsHeight || 0 };
+  }
+  function getRsOffset() {
+    return { x: alt1.rsX || 0, y: alt1.rsY || 0 };
+  }
+
+  // ---------- Overlay (absolute) ----------
+  function overlayRectAbs(absX, absY, w, h, ms = 900) {
     try {
       if (!window.alt1) return false;
-      const colorNum = 0x00ff00; // green
+      const colorNum = 0x00ff00;
       if (typeof alt1.overLayRect === "function") { alt1.overLayRect(absX, absY, w, h, colorNum, 2, ms); return true; }
       if (typeof alt1.overLayRectEx === "function") { alt1.overLayRectEx(absX, absY, w, h, colorNum, 2, ms); return true; }
       if (typeof alt1.overlayRect === "function") { alt1.overlayRect(absX, absY, w, h, colorNum, 2, ms); return true; }
@@ -126,12 +121,11 @@
     }
   }
 
-  function overlayRectRs(rsX, rsY, w, h, ms = 1200) {
+  function overlayRectRs(rsX, rsY, w, h, ms = 900) {
     const o = getRsOffset();
     return overlayRectAbs(o.x + rsX, o.y + rsY, w, h, ms);
   }
 
-  // Throttle overlays so they don't spam/focus-jitter
   let lastOverlayAt = 0;
   function overlayRectRsThrottled(rsX, rsY, w, h, ms = 900, minGapMs = 800) {
     const now = Date.now();
@@ -140,8 +134,8 @@
     return overlayRectRs(rsX, rsY, w, h, ms);
   }
 
-  // ---------------- Preview drawing ----------------
-  function drawImageScaled(img, label, overlayRects) {
+  // ---------- Preview ----------
+  function drawImageScaled(img, label) {
     if (!ctx || !canvas) return;
 
     if (!img) {
@@ -179,37 +173,17 @@
       ctx.font = "12px Arial";
       ctx.fillText(label, 12, 21);
     }
-
-    if (overlayRects && overlayRects.length) {
-      ctx.lineWidth = 2;
-      overlayRects.forEach(r => {
-        const fx = ox + Math.floor(r.x * scale);
-        const fy = oy + Math.floor(r.y * scale);
-        const fw = Math.floor(r.w * scale);
-        const fh = Math.floor(r.h * scale);
-        ctx.strokeStyle = r.color || "lime";
-        ctx.strokeRect(fx, fy, fw, fh);
-        if (r.label) {
-          ctx.fillStyle = r.color || "lime";
-          ctx.font = "12px Arial";
-          ctx.fillText(r.label, fx + 3, fy - 4);
-        }
-      });
-    }
   }
 
-  // ---------------- Scan area (RS-relative) ----------------
+  // ---------- Scan preset (explicit wiring) ----------
   function getScanPreset() {
-    const saved = (scanPresetEl && scanPresetEl.value) || load(LS_SCAN) || "top";
-    if (scanPresetEl && scanPresetEl.value !== saved) scanPresetEl.value = saved;
+    const v = (scanPresetEl && scanPresetEl.value) || load(LS_SCAN) || "top";
+    return v || "top";
+  }
 
-    if (scanPresetEl && !scanPresetEl._wired) {
-      scanPresetEl._wired = true;
-      scanPresetEl.addEventListener("change", () => {
-        try { localStorage.setItem(LS_SCAN, scanPresetEl.value); } catch {}
-      });
-    }
-    return saved;
+  function setScanPreset(v) {
+    if (scanPresetEl) scanPresetEl.value = v;
+    try { localStorage.setItem(LS_SCAN, v); } catch {}
   }
 
   function getScanAreaConfig() {
@@ -232,7 +206,7 @@
     };
   }
 
-  // ---------------- Progress from learned B patch ----------------
+  // ---------- Progress from learned B patch ----------
   function barEdgeFromPatch(img) {
     if (!img || img.width < 40 || img.height < 8) return { ok: false, edgeX: 0, score: 0 };
 
@@ -263,62 +237,14 @@
     const frac = bestX / Math.max(1, w - 1);
     if (frac < 0.08 || frac > 0.95) return { ok: false, edgeX: bestX, score: bestG / 255 };
 
-    function rough(i0, i1) {
-      let s = 0, c = 0;
-      for (let x = i0 + 1; x < i1; x++) { s += Math.abs(col[x] - col[x - 1]); c++; }
-      return c ? (s / c) / 255 : 1;
-    }
-
-    const rL = rough(0, bestX);
-    const rR = rough(bestX, w);
-    const stepScore = clamp(bestG / 255, 0, 1);
-    const uniformScore = clamp(1.0 - (rL * 2.0 + rR * 2.0) / 2.0, 0, 1);
-    const score = stepScore * 0.70 + uniformScore * 0.30;
-
+    const score = clamp(bestG / 255, 0, 1);
     return { ok: score >= 0.12, edgeX: bestX, score };
   }
 
-  // ---------------- Triple-anchor learn/fast-lock ----------------
-  function learnTripleAnchorFromDialog(dialogRsRect) {
-    const img = captureRegion(dialogRsRect.x, dialogRsRect.y, dialogRsRect.w, dialogRsRect.h);
-    if (!img) return false;
-
-    const Aw = 80, Ah = 28;
-    const Ax = img.width - Aw - 20;
-    const Ay = 10;
-
-    const Bw = 140, Bh = 20;
-    const Bx = Math.floor((img.width - Bw) / 2);
-    const By = Math.floor(img.height * 0.55);
-
-    const Cw = 26, Ch = 26;
-    const Cx = img.width - Cw - 10;
-    const Cy = 10;
-
-    const bytesA = cropRGBA(img, Ax, Ay, Aw, Ah);
-    const bytesB = cropRGBA(img, Bx, By, Bw, Bh);
-    const bytesC = cropRGBA(img, Cx, Cy, Cw, Ch);
-
-    save(LS_MULTI, {
-      A: { w: Aw, h: Ah, b64: bytesToB64(bytesA) },
-      B: { w: Bw, h: Bh, b64: bytesToB64(bytesB) },
-      C: { w: Cw, h: Ch, b64: bytesToB64(bytesC) },
-      dxB: (Bx - Ax), dyB: (By - Ay),
-      dxC: (Cx - Ax), dyC: (Cy - Ay),
-      dialogW: img.width, dialogH: img.height,
-      Ax, Ay
-    });
-
-    save(LS_DIALOG, { x: dialogRsRect.x|0, y: dialogRsRect.y|0, w: img.width|0, h: img.height|0 });
-    return true;
-  }
-
+  // ---------- Fast lock ----------
   function tryTripleAnchorFastLock() {
     const s = load(LS_MULTI);
     if (!s) return false;
-
-    const rs = getRsSize();
-    if (!rs.w || !rs.h) return false;
 
     const A = makeNeedle(s.A.w, s.A.h, b64ToBytes(s.A.b64));
     const B = makeNeedle(s.B.w, s.B.h, b64ToBytes(s.B.b64));
@@ -338,6 +264,7 @@
     const bx = (ax + s.dxB) | 0, by = (ay + s.dyB) | 0;
     const cx = (ax + s.dxC) | 0, cy = (ay + s.dyC) | 0;
 
+    // Containment gate
     if (s.dialogW && s.dialogH && typeof s.Ax === "number" && typeof s.Ay === "number") {
       const dialogX = ax - s.Ax;
       const dialogY = ay - s.Ay;
@@ -353,7 +280,6 @@
     }
 
     const pad = 8;
-
     const imgB = captureRegion(bx - pad, by - pad, s.B.w + pad * 2, s.B.h + pad * 2);
     if (!imgB) return false;
     const mB = findAnchor(imgB, B, { tolerance: 55, step: 1, minScore: 0.02 });
@@ -365,34 +291,25 @@
 
     if (!cOK && !(mA.score >= 0.80 && mB.score >= 0.78)) return false;
 
-    // Save lock (RS-relative)
     save(LS_LOCK, { x: ax, y: ay });
     updateSavedLockLabel();
 
-    // Save dialog rect (RS-relative) if geometry known
     if (s.dialogW && s.dialogH) {
       const dialogX = (ax - (s.Ax || 0)) | 0;
       const dialogY = (ay - (s.Ay || 0)) | 0;
-      save(LS_DIALOG, { x: dialogX, y: dialogY, w: s.dialogW|0, h: s.dialogH|0 });
-      // Green square on actual screen at lock (ABS)
-      overlayRectRs(dialogX, dialogY, s.dialogW|0, s.dialogH|0, 1200);
+      const d = { x: dialogX, y: dialogY, w: s.dialogW|0, h: s.dialogH|0 };
+      save(LS_DIALOG, d);
+      overlayRectRsThrottled(d.x, d.y, d.w, d.h, 900, 400);
     }
 
     setLock(`x=${ax}, y=${ay}`);
-    setStatus("Locked (fast A+B+C)");
+    setStatus("Locked (fast)");
     setProgress("locked");
-
-    const overlays = [
-      { x: mA.x, y: mA.y, w: s.A.w, h: s.A.h, color: "#00ffff", label: "A" },
-      { x: (bx - searchRect.x), y: (by - searchRect.y), w: s.B.w, h: s.B.h, color: "#00ff00", label: "B" },
-      { x: (cx - searchRect.x), y: (cy - searchRect.y), w: s.C.w, h: s.C.h, color: "#ff9900", label: "C" }
-    ];
-    drawImageScaled(searchImg, `FAST A=${mA.score.toFixed(2)} B=${mB.score.toFixed(2)} C=${cOK ? "ok" : "—"}`, overlays);
+    drawImageScaled(searchImg, `FAST A=${mA.score.toFixed(2)} B=${mB.score.toFixed(2)} C=${cOK ? "ok" : "—"}`);
 
     return true;
   }
 
-  // ---------------- Per-tick lock validation (RS-relative) ----------------
   function validateLockAndGetRects() {
     const s = load(LS_MULTI);
     const lock = load(LS_LOCK);
@@ -407,14 +324,12 @@
     const padA = 6;
     const imgA = captureRegion(ax - padA, ay - padA, s.A.w + padA * 2, s.A.h + padA * 2);
     if (!imgA) return { ok: false, reason: "capA_null" };
-
     const mA = findAnchor(imgA, A, { tolerance: 58, step: 1, minScore: 0.02 });
     if (!mA?.ok || mA.score < 0.66) return { ok: false, reason: "A_miss", mA };
 
     const padB = 6;
     const imgB = captureRegion(bx - padB, by - padB, s.B.w + padB * 2, s.B.h + padB * 2);
     if (!imgB) return { ok: false, reason: "capB_null", mA };
-
     const mB = findAnchor(imgB, B, { tolerance: 58, step: 1, minScore: 0.02 });
     if (!mB?.ok || mB.score < 0.64) return { ok: false, reason: "B_miss", mA, mB };
 
@@ -423,120 +338,178 @@
     const dialogW = (s.dialogW || 0) | 0;
     const dialogH = (s.dialogH || 0) | 0;
 
-    const bRect = { x: bx, y: by, w: s.B.w|0, h: s.B.h|0 };
-
     return {
       ok: true,
-      ax, ay,
       dialog: dialogW && dialogH ? { x: dialogX, y: dialogY, w: dialogW, h: dialogH } : null,
-      bRect,
+      bRect: { x: bx, y: by, w: s.B.w|0, h: s.B.h|0 },
       scores: { A: mA.score, B: mB.score }
     };
   }
 
-  // ---------------- Capture loop ----------------
+  // ---------- Loop ----------
   let running = false;
-  let captureTimer = null;
-  let lastGoodFrame = null;
+  let timer = null;
+  let lastGood = null;
   let lastPct = null;
 
-  function startCaptureLoop() {
-    if (captureTimer) return;
-    captureTimer = setInterval(() => {
-      if (!running) return;
+  // "Test flash" requested flag (handled in loop to avoid minimizing/focus issues)
+  let flashRequest = 0;
 
-      const hasLock = !!load(LS_LOCK);
+  function loopTick() {
+    const diag = window.progflashCaptureDiag || {};
+    const area = getScanAreaConfig();
 
-      if (hasLock) {
-        const v = validateLockAndGetRects();
+    // Handle deferred test flash here (not in click handler)
+    if (flashRequest) {
+      flashRequest = 0;
+      // Flash RS top-left and, if present, current dialog
+      overlayRectRsThrottled(20, 20, 140, 70, 900, 0);
+      const d = load(LS_DIALOG);
+      if (d) overlayRectRsThrottled(d.x, d.y, d.w, d.h, 900, 0);
+    }
 
-        if (!v.ok) {
-          setStatus(`LOCKED (lost) ${v.reason} -> Auto find`);
-          setProgress("—");
-          if (lastGoodFrame) drawImageScaled(lastGoodFrame.img, lastGoodFrame.label, lastGoodFrame.overlays);
-          return;
-        }
-
-        if (v.dialog) {
-          save(LS_DIALOG, v.dialog);
-          // Always show green box where we think the dialog is (throttled)
-          overlayRectRsThrottled(v.dialog.x, v.dialog.y, v.dialog.w, v.dialog.h, 800, 900);
-        }
-
-        const imgB = captureRegion(v.bRect.x, v.bRect.y, v.bRect.w, v.bRect.h);
-        if (!imgB) {
-          setStatus("LOCKED (capture failed)");
-          if (lastGoodFrame) drawImageScaled(lastGoodFrame.img, lastGoodFrame.label, lastGoodFrame.overlays);
-          return;
-        }
-
-        const edge = barEdgeFromPatch(imgB);
-        let pctTxt = "—";
-        if (edge.ok) {
-          const pct = clamp(edge.edgeX / Math.max(1, (imgB.width - 1)), 0, 1);
-          pctTxt = Math.round(pct * 100) + "%";
-          setProgress(pctTxt);
-
-          if (v.dialog && (pct >= 0.985)) {
-            overlayRectRsThrottled(v.dialog.x, v.dialog.y, v.dialog.w, v.dialog.h, 900, 500);
-          } else if (v.dialog && lastPct !== null && Math.abs(pct - lastPct) >= 0.12) {
-            overlayRectRsThrottled(v.dialog.x, v.dialog.y, v.dialog.w, v.dialog.h, 450, 500);
-          }
-          lastPct = pct;
-          setStatus("Locked");
-        } else {
-          setStatus("LOCKED (bar edge weak)");
-          setProgress("—");
-        }
-
-        // Prefer drawing dialog preview if available, else draw B patch
-        const s = load(LS_MULTI);
-        if (v.dialog) {
-          const imgDlg = captureRegion(v.dialog.x, v.dialog.y, v.dialog.w, v.dialog.h);
-          if (imgDlg) {
-            const overlays = [];
-            if (s) {
-              overlays.push({ x: (v.ax - v.dialog.x), y: (v.ay - v.dialog.y), w: s.A.w, h: s.A.h, color: "#00ffff", label: "A" });
-              overlays.push({ x: (v.bRect.x - v.dialog.x), y: (v.bRect.y - v.dialog.y), w: s.B.w, h: s.B.h, color: "#00ff00", label: "B" });
-              overlays.push({ x: (v.ax + s.dxC - v.dialog.x), y: (v.ay + s.dyC - v.dialog.y), w: s.C.w, h: s.C.h, color: "#ff9900", label: "C" });
-            }
-            const label = `LOCK ${pctTxt} A=${v.scores.A.toFixed(2)} B=${v.scores.B.toFixed(2)} edge=${edge.score.toFixed(2)}`;
-            drawImageScaled(imgDlg, label, overlays);
-            lastGoodFrame = { img: imgDlg, label, overlays };
-          }
-        } else {
-          const label = `LOCK(B) ${pctTxt} A=${v.scores.A.toFixed(2)} B=${v.scores.B.toFixed(2)} edge=${edge.score.toFixed(2)}`;
-          drawImageScaled(imgB, label, []);
-          lastGoodFrame = { img: imgB, label, overlays: [] };
-        }
-
+    const hasLock = !!load(LS_LOCK);
+    if (hasLock) {
+      const v = validateLockAndGetRects();
+      if (!v.ok) {
+        setStatus(`LOCKED (lost) ${v.reason}`);
+        setProgress("—");
+        if (lastGood) drawImageScaled(lastGood.img, lastGood.label);
+        dbg({
+          note: "locked-lost",
+          reason: v.reason,
+          scanPreset: getScanPreset(),
+          scanRect: { x: area.x0, y: area.y0, w: area.x1 - area.x0, h: area.y1 - area.y0 },
+          captureDiag: diag
+        });
         return;
       }
 
-      // Unlocked path: moving IDLE preview
-      const area = getScanAreaConfig();
-      const w = Math.min(560, area.x1 - area.x0);
-      const h = Math.min(260, area.y1 - area.y0);
-      const img = captureRegion(area.x0, area.y0, w, h);
-      drawImageScaled(img, `IDLE preview (${area.name})`, []);
-      if (!img) {
-        // If capture fails, show useful diag
-        if (window.progflashCaptureDiag) dbg({ idleCaptureFailed: true, diag: window.progflashCaptureDiag });
+      if (v.dialog) {
+        save(LS_DIALOG, v.dialog);
+        // green box where it's locked onto
+        overlayRectRsThrottled(v.dialog.x, v.dialog.y, v.dialog.w, v.dialog.h, 800, 900);
       }
+
+      const imgB = captureRegion(v.bRect.x, v.bRect.y, v.bRect.w, v.bRect.h);
+      if (!imgB) {
+        setStatus("LOCKED (capture failed)");
+        if (lastGood) drawImageScaled(lastGood.img, lastGood.label);
+        dbg({
+          note: "locked-capture-failed",
+          scanPreset: getScanPreset(),
+          scanRect: { x: area.x0, y: area.y0, w: area.x1 - area.x0, h: area.y1 - area.y0 },
+          captureDiag: diag
+        });
+        return;
+      }
+
+      const edge = barEdgeFromPatch(imgB);
+      if (edge.ok) {
+        const pct = clamp(edge.edgeX / Math.max(1, imgB.width - 1), 0, 1);
+        const pctTxt = Math.round(pct * 100) + "%";
+        setStatus("Locked");
+        setProgress(pctTxt);
+
+        if (v.dialog && pct >= 0.985) overlayRectRsThrottled(v.dialog.x, v.dialog.y, v.dialog.w, v.dialog.h, 900, 500);
+        else if (v.dialog && lastPct !== null && Math.abs(pct - lastPct) >= 0.12) overlayRectRsThrottled(v.dialog.x, v.dialog.y, v.dialog.w, v.dialog.h, 450, 500);
+
+        lastPct = pct;
+
+        if (v.dialog) {
+          const imgDlg = captureRegion(v.dialog.x, v.dialog.y, v.dialog.w, v.dialog.h);
+          if (imgDlg) {
+            const label = `LOCK ${pctTxt} A=${v.scores.A.toFixed(2)} B=${v.scores.B.toFixed(2)} edge=${edge.score.toFixed(2)}`;
+            drawImageScaled(imgDlg, label);
+            lastGood = { img: imgDlg, label };
+          }
+        } else {
+          const label = `LOCK(B) ${pctTxt} edge=${edge.score.toFixed(2)}`;
+          drawImageScaled(imgB, label);
+          lastGood = { img: imgB, label };
+        }
+      } else {
+        setStatus("LOCKED (bar edge weak)");
+        setProgress("—");
+        const label = `LOCK(B) edge weak (score=${edge.score.toFixed(2)})`;
+        drawImageScaled(imgB, label);
+        lastGood = { img: imgB, label };
+      }
+
+      dbg({
+        note: "locked",
+        scanPreset: getScanPreset(),
+        scanRect: { x: area.x0, y: area.y0, w: area.x1 - area.x0, h: area.y1 - area.y0 },
+        dialog: load(LS_DIALOG),
+        captureDiag: diag
+      });
+      return;
+    }
+
+    // Unlocked preview: show actual scan region capture so changing the preset should visibly change the preview.
+    const w = Math.min(560, area.x1 - area.x0);
+    const h = Math.min(260, area.y1 - area.y0);
+    const img = captureRegion(area.x0, area.y0, w, h);
+
+    drawImageScaled(img, `IDLE (${area.name}) scan x=${area.x0} y=${area.y0} w=${w} h=${h}`);
+    dbg({
+      note: "idle",
+      scanPreset: getScanPreset(),
+      scanRect: { x: area.x0, y: area.y0, w: area.x1 - area.x0, h: area.y1 - area.y0 },
+      captureDiag: diag
+    });
+  }
+
+  function startLoop() {
+    if (timer) return;
+    timer = setInterval(() => {
+      if (!running) return;
+      loopTick();
     }, 200);
   }
 
-  function stopCaptureLoop() {
-    if (captureTimer) { clearInterval(captureTimer); captureTimer = null; }
+  function stopLoop() {
+    if (timer) { clearInterval(timer); timer = null; }
   }
 
-  // ---------------- Auto-find ----------------
+  // ---------- Actions ----------
+  function start() {
+    if (!window.alt1) { setStatus("Alt1 missing"); dbg("Open inside Alt1."); return; }
+    if (!alt1.permissionPixel) { setStatus("No pixel permission"); dbg("Enable pixel permission."); return; }
+    if (typeof window.captureRegion !== "function" || typeof window.findAnchor !== "function") {
+      setStatus("matcher.js not ready");
+      dbg({ captureRegion: typeof window.captureRegion, findAnchor: typeof window.findAnchor });
+      return;
+    }
+
+    // Ensure dropdown reflects stored preset on boot
+    const stored = load(LS_SCAN);
+    if (scanPresetEl && stored) scanPresetEl.value = stored;
+
+    running = true;
+    setMode("Running");
+    setProgress("—");
+    startLoop();
+
+    setStatus("Fast lock...");
+    if (tryTripleAnchorFastLock()) return;
+    setStatus("Idle (press Auto find)");
+  }
+
+  function stop() {
+    running = false;
+    stopLoop();
+    setMode("Not running");
+    setStatus("Idle");
+    setProgress("—");
+  }
+
   function autoFind() {
     if (!running) start();
 
     del(LS_LOCK);
     del(LS_DIALOG);
-    lastGoodFrame = null;
+    lastGood = null;
     lastPct = null;
     updateSavedLockLabel();
 
@@ -545,12 +518,11 @@
     setStatus("Auto find: waiting for fast lock...");
 
     const t0 = Date.now();
-    const maxMs = 8000;
+    const maxMs = 10000;
 
     const tick = () => {
       if (!running) return;
       if (load(LS_LOCK)) return;
-
       if (tryTripleAnchorFastLock()) return;
 
       if (Date.now() - t0 > maxMs) {
@@ -562,40 +534,11 @@
     tick();
   }
 
-  // ---------------- Buttons ----------------
-  function start() {
-    if (!window.alt1) { setStatus("Alt1 missing"); dbg("Open inside Alt1."); return; }
-    if (!alt1.permissionPixel) { setStatus("No pixel permission"); dbg("Enable pixel permission."); return; }
-    if (typeof window.captureRegion !== "function" || typeof window.findAnchor !== "function") {
-      setStatus("matcher.js not ready");
-      dbg({ captureRegion: typeof window.captureRegion, findAnchor: typeof window.findAnchor });
-      return;
-    }
-
-    running = true;
-    setMode("Running");
-    setProgress("—");
-    startCaptureLoop();
-
-    setStatus("Fast lock...");
-    if (tryTripleAnchorFastLock()) return;
-
-    setStatus("Idle (press Auto find)");
-  }
-
-  function stop() {
-    running = false;
-    stopCaptureLoop();
-    setMode("Not running");
-    setStatus("Idle");
-    setProgress("—");
-  }
-
   function clearLock() {
     del(LS_LOCK);
     del(LS_MULTI);
     del(LS_DIALOG);
-    lastGoodFrame = null;
+    lastGood = null;
     lastPct = null;
 
     updateSavedLockLabel();
@@ -605,20 +548,30 @@
   }
 
   function testFlash() {
-    // Draw a small green box near top-left of RS client (RS-relative -> ABS overlay)
-    overlayRectRs(20, 20, 120, 60, 900);
-    // Also if we have a dialog rect, show it
-    const d = load(LS_DIALOG);
-    if (d) overlayRectRs(d.x, d.y, d.w, d.h, 900);
+    // DO NOT overlay directly here (can minimize/focus Alt1 on some setups).
+    // Defer to loop tick.
+    flashRequest = Date.now();
+    setStatus("Test flash requested");
   }
 
-  // ---------------- Init UI ----------------
+  // ---------- Init ----------
   updateSavedLockLabel();
   setMode("Not running");
   setStatus("Idle");
   setLock(load(LS_LOCK) ? "saved" : "none");
   setProgress("—");
-  dbg({ note: "app_final10: RS-relative capture; ABS overlay. Preview should move again." });
+
+  // Wire scan preset dropdown explicitly
+  if (scanPresetEl) {
+    const stored = load(LS_SCAN);
+    if (stored) scanPresetEl.value = stored;
+
+    scanPresetEl.addEventListener("change", () => {
+      setScanPreset(scanPresetEl.value);
+      // force immediate label update in debug/preview next tick
+      setStatus(`Scan area set: ${scanPresetEl.value}`);
+    });
+  }
 
   if (startBtn) startBtn.onclick = start;
   if (stopBtn) stopBtn.onclick = stop;
@@ -626,6 +579,8 @@
   if (clearLockBtn) clearLockBtn.onclick = clearLock;
   if (testFlashBtn) testFlashBtn.onclick = testFlash;
 
-  // Persist scan preset changes
-  getScanPreset();
+  dbg({
+    note: "app_final11: fixed scan preset wiring; deferred test flash to avoid minimizing; shows scanRect in debug.",
+    scanPreset: getScanPreset()
+  });
 })();
