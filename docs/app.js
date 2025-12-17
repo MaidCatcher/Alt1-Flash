@@ -578,7 +578,7 @@
         pushBest(scanCursor.best, bestInTile);
       }
 
-      // Record diagnostics for this tile so we can see how the scan behaves.
+      // Record diagnostics for this tile so we can see how the scan behaves..
       try {
         window.progflashCaptureDiag = Object.assign({}, window.progflashCaptureDiag || {}, {
           lastScan: {
