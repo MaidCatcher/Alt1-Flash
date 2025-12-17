@@ -36,7 +36,7 @@
   const canvas = $("previewCanvas");
   const ctx = canvas ? canvas.getContext("2d", { willReadFrequently: true }) : null;
 
-  const APP_VERSION = "0.6.22";
+  const APP_VERSION = "0.6.23";
   const BUILD_ID = "final-" + Date.now();
 
   function setStatus(v) { if (statusEl) statusEl.textContent = v; }
@@ -901,6 +901,8 @@
   function clearLock() {
     del(LS_LOCK);
     del(LS_MULTI);
+    del(LS_DIALOG);
+    window._pf_lastPct = null;
     del(LS_DIALOG);
     window._pf_lastPct = null;
     updateSavedLockLabel();
