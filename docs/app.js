@@ -1,20 +1,12 @@
-// ProgFlash app_final9.js
-// Fixes:
-// 1) Syntax/parse issues in prior app.js
-// 2) Remove undefined 'c' reference inside fast-lock
-// 3) Robustness: per-tick lock validation using learned A+B needles
-// 4) Progress: compute from learned B region (bar edge inside B patch), not whole-dialog heuristic
-// 5) UI: don't show IDLE preview after lock; instead show "LOCKED (capture failed)" if needed
+// ProgFlash app_final10.js
+// Fixes from final9:
+// - captureRegion() uses RS-relative coords (matcher.js), so ALL captures/locks now operate in RS-relative space.
+// - restores moving preview.
+// - adds "green square on screen where it's locked" (dialog rect) when locked (throttled).
 //
 // Depends on matcher.js globals:
-//   captureRegion(x,y,w,h) -> wrapped ImageData-like {width,height,data,getPixel(x,y)}
+//   captureRegion(x,y,w,h) -> RS-relative capture
 //   findAnchor(haystack, needle, opts)
-//
-// UI expected ids (from index.html):
-//   startBtn, stopBtn, autoFindBtn, clearLockBtn, testFlashBtn
-//   status, mode, lock, progress, debugBox
-//   previewCanvas
-//   scanPreset <select> (optional but present in your index.html)
 
 (() => {
   // ---------------- DOM ----------------
@@ -33,7 +25,7 @@
   const testFlashBtn = $("testFlashBtn");
 
   const savedLockEl = $("savedLock");
-  const scanPresetEl = $("scanPreset"); // index.html uses scanPreset
+  const scanPresetEl = $("scanPreset"); // your UI shows "Scan area:" dropdown
 
   const canvas = $("previewCanvas");
   const ctx = canvas ? canvas.getContext("2d", { willReadFrequently: true }) : null;
@@ -48,10 +40,13 @@
   }
 
   // ---------------- Storage ----------------
-  const LS_LOCK   = "progflash.lockPos";         // {x,y} where x,y = absolute RS coords of Anchor A top-left
-  const LS_MULTI  = "progflash.multiAnchorABC";  // learned A/B/C + offsets + dialog dims
-  const LS_DIALOG = "progflash.dialogRect";      // {x,y,w,h}
-  const LS_SCAN   = "progflash.scanPreset";      // "top|mid|bot|full" (index.html uses this key too)
+  // Store everything in RS-relative coords:
+  // lockPos: anchor A top-left in RS coords.
+  // dialogRect: dialog bounds in RS coords.
+  const LS_LOCK   = "progflash.lockPos";         // {x,y} RS-relative
+  const LS_MULTI  = "progflash.multiAnchorABC";  // learned patches + offsets + dialog dims
+  const LS_DIALOG = "progflash.dialogRect";      // {x,y,w,h} RS-relative
+  const LS_SCAN   = "progflash.scanPreset";      // "top|mid|bot|full"
 
   function save(key, obj) { try { localStorage.setItem(key, JSON.stringify(obj)); } catch {} }
   function load(key) { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } }
@@ -63,7 +58,13 @@
     savedLockEl.textContent = p ? `x=${p.x},y=${p.y}` : "none";
   }
 
-  // ---------------- Utils ----------------
+  // ---------------- RS helpers ----------------
+  function getRsSize() {
+    return { w: alt1.rsWidth || 0, h: alt1.rsHeight || 0 };
+  }
+  function getRsOffset() {
+    return { x: alt1.rsX || 0, y: alt1.rsY || 0 };
+  }
   function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
 
   function rgba(r, g, b, a = 255) {
@@ -75,7 +76,6 @@
     for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
     return btoa(s);
   }
-
   function b64ToBytes(b64) {
     const bin = atob(b64);
     const out = new Uint8ClampedArray(bin.length);
@@ -111,31 +111,47 @@
     return out;
   }
 
-  function getRsRect() {
-    const w = alt1.rsWidth || 0;
-    const h = alt1.rsHeight || 0;
-    const x = alt1.rsX || 0;
-    const y = alt1.rsY || 0;
-    return { x, y, w, h };
-  }
-
-  // ---------------- Screen overlay (Alt1) ----------------
-  function overlayRectOnScreen(x, y, w, h, ms = 1200) {
+  // ---------------- Overlay on screen (ABSOLUTE) ----------------
+  function overlayRectAbs(absX, absY, w, h, ms = 1200) {
     try {
       if (!window.alt1) return false;
-      const colorNum = 0x00ff00;
-      if (typeof alt1.overLayRect === "function") { alt1.overLayRect(x, y, w, h, colorNum, 2, ms); return true; }
-      if (typeof alt1.overLayRectEx === "function") { alt1.overLayRectEx(x, y, w, h, colorNum, 2, ms); return true; }
-      if (typeof alt1.overlayRect === "function") { alt1.overlayRect(x, y, w, h, colorNum, 2, ms); return true; }
+      const colorNum = 0x00ff00; // green
+      if (typeof alt1.overLayRect === "function") { alt1.overLayRect(absX, absY, w, h, colorNum, 2, ms); return true; }
+      if (typeof alt1.overLayRectEx === "function") { alt1.overLayRectEx(absX, absY, w, h, colorNum, 2, ms); return true; }
+      if (typeof alt1.overlayRect === "function") { alt1.overlayRect(absX, absY, w, h, colorNum, 2, ms); return true; }
       return false;
     } catch {
       return false;
     }
   }
 
+  function overlayRectRs(rsX, rsY, w, h, ms = 1200) {
+    const o = getRsOffset();
+    return overlayRectAbs(o.x + rsX, o.y + rsY, w, h, ms);
+  }
+
+  // Throttle overlays so they don't spam/focus-jitter
+  let lastOverlayAt = 0;
+  function overlayRectRsThrottled(rsX, rsY, w, h, ms = 900, minGapMs = 800) {
+    const now = Date.now();
+    if (now - lastOverlayAt < minGapMs) return false;
+    lastOverlayAt = now;
+    return overlayRectRs(rsX, rsY, w, h, ms);
+  }
+
   // ---------------- Preview drawing ----------------
   function drawImageScaled(img, label, overlayRects) {
-    if (!ctx || !canvas || !img) return;
+    if (!ctx || !canvas) return;
+
+    if (!img) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "rgba(0,0,0,0.65)";
+      ctx.fillRect(0, 0, canvas.width, 28);
+      ctx.fillStyle = "white";
+      ctx.font = "12px Arial";
+      ctx.fillText(label || "No capture", 10, 18);
+      return;
+    }
 
     const id = new ImageData(new Uint8ClampedArray(img.data), img.width, img.height);
 
@@ -181,7 +197,7 @@
     }
   }
 
-  // ---------------- Scan area ----------------
+  // ---------------- Scan area (RS-relative) ----------------
   function getScanPreset() {
     const saved = (scanPresetEl && scanPresetEl.value) || load(LS_SCAN) || "top";
     if (scanPresetEl && scanPresetEl.value !== saved) scanPresetEl.value = saved;
@@ -196,7 +212,7 @@
   }
 
   function getScanAreaConfig() {
-    const rs = getRsRect();
+    const rs = getRsSize();
     const v = getScanPreset();
 
     const xMinFrac = 0.12, xMaxFrac = 0.88;
@@ -205,7 +221,7 @@
     if (v === "top") { y0 = 0; y1 = Math.floor(rs.h * 0.62); }
     else if (v === "mid" || v === "middle") { y0 = Math.floor(rs.h * 0.20); y1 = Math.floor(rs.h * 0.85); }
     else if (v === "bot" || v === "bottom") { y0 = Math.floor(rs.h * 0.38); y1 = rs.h; }
-    else { y0 = 0; y1 = rs.h; } // full
+    else { y0 = 0; y1 = rs.h; }
 
     return {
       name: v,
@@ -216,14 +232,10 @@
   }
 
   // ---------------- Progress from learned B patch ----------------
-  // Compute progress edge inside a small bar patch by finding the strongest vertical transition.
-  // Returns { ok, edgeX, score } where edgeX is 0..(w-1)
   function barEdgeFromPatch(img) {
     if (!img || img.width < 40 || img.height < 8) return { ok: false, edgeX: 0, score: 0 };
 
     const w = img.width, h = img.height;
-
-    // Work on a central band to avoid frame edges.
     const y0 = Math.floor(h * 0.25);
     const y1 = Math.floor(h * 0.75);
 
@@ -233,7 +245,6 @@
       return (r * 77 + g * 150 + b * 29) >> 8;
     }
 
-    // Column mean grayscale
     const col = new Float32Array(w);
     for (let x = 0; x < w; x++) {
       let s = 0, c = 0;
@@ -241,7 +252,6 @@
       col[x] = c ? (s / c) : 0;
     }
 
-    // Gradient magnitude
     let bestG = 0;
     let bestX = Math.floor(w * 0.5);
     for (let x = 2; x < w - 2; x++) {
@@ -249,41 +259,37 @@
       if (g > bestG) { bestG = g; bestX = x; }
     }
 
-    // Reject edges too near ends; they produce false “always full” or “always empty”.
     const frac = bestX / Math.max(1, w - 1);
     if (frac < 0.08 || frac > 0.95) return { ok: false, edgeX: bestX, score: bestG / 255 };
 
-    // Score: strong step and relatively flat sides
     function rough(i0, i1) {
       let s = 0, c = 0;
       for (let x = i0 + 1; x < i1; x++) { s += Math.abs(col[x] - col[x - 1]); c++; }
       return c ? (s / c) / 255 : 1;
     }
+
     const rL = rough(0, bestX);
     const rR = rough(bestX, w);
     const stepScore = clamp(bestG / 255, 0, 1);
     const uniformScore = clamp(1.0 - (rL * 2.0 + rR * 2.0) / 2.0, 0, 1);
-
     const score = stepScore * 0.70 + uniformScore * 0.30;
+
     return { ok: score >= 0.12, edgeX: bestX, score };
   }
 
   // ---------------- Triple-anchor learn/fast-lock ----------------
-  function learnTripleAnchorFromDialog(dialogAbsRect) {
-    const img = captureRegion(dialogAbsRect.x, dialogAbsRect.y, dialogAbsRect.w, dialogAbsRect.h);
+  function learnTripleAnchorFromDialog(dialogRsRect) {
+    const img = captureRegion(dialogRsRect.x, dialogRsRect.y, dialogRsRect.w, dialogRsRect.h);
     if (!img) return false;
 
-    // A: top-right frame patch
     const Aw = 80, Ah = 28;
     const Ax = img.width - Aw - 20;
     const Ay = 10;
 
-    // B: progress bar patch around center
     const Bw = 140, Bh = 20;
     const Bx = Math.floor((img.width - Bw) / 2);
     const By = Math.floor(img.height * 0.55);
 
-    // C: close X patch
     const Cw = 26, Ch = 26;
     const Cx = img.width - Cw - 10;
     const Cy = 10;
@@ -302,7 +308,7 @@
       Ax, Ay
     });
 
-    save(LS_DIALOG, { x: dialogAbsRect.x|0, y: dialogAbsRect.y|0, w: img.width|0, h: img.height|0 });
+    save(LS_DIALOG, { x: dialogRsRect.x|0, y: dialogRsRect.y|0, w: img.width|0, h: img.height|0 });
     return true;
   }
 
@@ -310,7 +316,7 @@
     const s = load(LS_MULTI);
     if (!s) return false;
 
-    const rs = getRsRect();
+    const rs = getRsSize();
     if (!rs.w || !rs.h) return false;
 
     const A = makeNeedle(s.A.w, s.A.h, b64ToBytes(s.A.b64));
@@ -331,7 +337,6 @@
     const bx = (ax + s.dxB) | 0, by = (ay + s.dyB) | 0;
     const cx = (ax + s.dxC) | 0, cy = (ay + s.dyC) | 0;
 
-    // Containment gate: predicted B/C inside dialog rectangle inferred from A position
     if (s.dialogW && s.dialogH && typeof s.Ax === "number" && typeof s.Ay === "number") {
       const dialogX = ax - s.Ax;
       const dialogY = ay - s.Ay;
@@ -359,15 +364,17 @@
 
     if (!cOK && !(mA.score >= 0.80 && mB.score >= 0.78)) return false;
 
-    // Save lock and dialog rect
+    // Save lock (RS-relative)
     save(LS_LOCK, { x: ax, y: ay });
     updateSavedLockLabel();
 
+    // Save dialog rect (RS-relative) if geometry known
     if (s.dialogW && s.dialogH) {
       const dialogX = (ax - (s.Ax || 0)) | 0;
       const dialogY = (ay - (s.Ay || 0)) | 0;
       save(LS_DIALOG, { x: dialogX, y: dialogY, w: s.dialogW|0, h: s.dialogH|0 });
-      overlayRectOnScreen(dialogX, dialogY, s.dialogW|0, s.dialogH|0, 1200);
+      // Green square on actual screen at lock (ABS)
+      overlayRectRs(dialogX, dialogY, s.dialogW|0, s.dialogH|0, 1200);
     }
 
     setLock(`x=${ax}, y=${ay}`);
@@ -384,7 +391,7 @@
     return true;
   }
 
-  // ---------------- Per-tick lock validation ----------------
+  // ---------------- Per-tick lock validation (RS-relative) ----------------
   function validateLockAndGetRects() {
     const s = load(LS_MULTI);
     const lock = load(LS_LOCK);
@@ -396,7 +403,6 @@
     const ax = lock.x|0, ay = lock.y|0;
     const bx = (ax + s.dxB)|0, by = (ay + s.dyB)|0;
 
-    // Validate A with a small capture
     const padA = 6;
     const imgA = captureRegion(ax - padA, ay - padA, s.A.w + padA * 2, s.A.h + padA * 2);
     if (!imgA) return { ok: false, reason: "capA_null" };
@@ -404,7 +410,6 @@
     const mA = findAnchor(imgA, A, { tolerance: 58, step: 1, minScore: 0.02 });
     if (!mA?.ok || mA.score < 0.66) return { ok: false, reason: "A_miss", mA };
 
-    // Validate B at predicted position
     const padB = 6;
     const imgB = captureRegion(bx - padB, by - padB, s.B.w + padB * 2, s.B.h + padB * 2);
     if (!imgB) return { ok: false, reason: "capB_null", mA };
@@ -412,13 +417,11 @@
     const mB = findAnchor(imgB, B, { tolerance: 58, step: 1, minScore: 0.02 });
     if (!mB?.ok || mB.score < 0.64) return { ok: false, reason: "B_miss", mA, mB };
 
-    // Dialog rect inferred from A
     const dialogX = (ax - (s.Ax || 0)) | 0;
     const dialogY = (ay - (s.Ay || 0)) | 0;
     const dialogW = (s.dialogW || 0) | 0;
     const dialogH = (s.dialogH || 0) | 0;
 
-    // B patch absolute rect (exact, without pads)
     const bRect = { x: bx, y: by, w: s.B.w|0, h: s.B.h|0 };
 
     return {
@@ -434,6 +437,7 @@
   let running = false;
   let captureTimer = null;
   let lastGoodFrame = null;
+  let lastPct = null;
 
   function startCaptureLoop() {
     if (captureTimer) return;
@@ -443,19 +447,19 @@
       const hasLock = !!load(LS_LOCK);
 
       if (hasLock) {
-        // Locked path: validate + compute progress from learned B patch
         const v = validateLockAndGetRects();
 
         if (!v.ok) {
-          setStatus(`LOCKED (lost) ${v.reason} -> Auto find recommended`);
+          setStatus(`LOCKED (lost) ${v.reason} -> Auto find`);
           setProgress("—");
-          // Do NOT fall back to IDLE preview while locked; keep last good frame if we have it.
           if (lastGoodFrame) drawImageScaled(lastGoodFrame.img, lastGoodFrame.label, lastGoodFrame.overlays);
           return;
         }
 
         if (v.dialog) {
           save(LS_DIALOG, v.dialog);
+          // Always show green box where we think the dialog is (throttled)
+          overlayRectRsThrottled(v.dialog.x, v.dialog.y, v.dialog.w, v.dialog.h, 800, 900);
         }
 
         const imgB = captureRegion(v.bRect.x, v.bRect.y, v.bRect.w, v.bRect.h);
@@ -466,49 +470,41 @@
         }
 
         const edge = barEdgeFromPatch(imgB);
-        if (!edge.ok) {
-          setStatus("LOCKED (bar edge weak)");
-          setProgress("—");
-        } else {
+        let pctTxt = "—";
+        if (edge.ok) {
           const pct = clamp(edge.edgeX / Math.max(1, (imgB.width - 1)), 0, 1);
-          const pctTxt = Math.round(pct * 100) + "%";
-          setStatus("Locked");
+          pctTxt = Math.round(pct * 100) + "%";
           setProgress(pctTxt);
 
-          const last = window._pf_lastPct ?? null;
-          window._pf_lastPct = pct;
-
-          // Flash only on meaningful completion/jumps
-          if (v.dialog && pct >= 0.985) {
-            overlayRectOnScreen(v.dialog.x, v.dialog.y, v.dialog.w, v.dialog.h, 900);
-          } else if (v.dialog && last !== null && Math.abs(pct - last) >= 0.12) {
-            overlayRectOnScreen(v.dialog.x, v.dialog.y, v.dialog.w, v.dialog.h, 450);
+          if (v.dialog && (pct >= 0.985)) {
+            overlayRectRsThrottled(v.dialog.x, v.dialog.y, v.dialog.w, v.dialog.h, 900, 500);
+          } else if (v.dialog && lastPct !== null && Math.abs(pct - lastPct) >= 0.12) {
+            overlayRectRsThrottled(v.dialog.x, v.dialog.y, v.dialog.w, v.dialog.h, 450, 500);
           }
+          lastPct = pct;
+          setStatus("Locked");
+        } else {
+          setStatus("LOCKED (bar edge weak)");
+          setProgress("—");
         }
 
-        // Preview shows B patch and inferred A/B/C boxes in dialog coords if possible
+        // Prefer drawing dialog preview if available, else draw B patch
         const s = load(LS_MULTI);
-        const overlays = [];
-        if (s && v.dialog) {
-          overlays.push({ x: (v.ax - v.dialog.x), y: (v.ay - v.dialog.y), w: s.A.w, h: s.A.h, color: "#00ffff", label: "A" });
-          overlays.push({ x: (v.bRect.x - v.dialog.x), y: (v.bRect.y - v.dialog.y), w: s.B.w, h: s.B.h, color: "#00ff00", label: "B" });
-          overlays.push({
-            x: (v.ax + s.dxC - v.dialog.x),
-            y: (v.ay + s.dyC - v.dialog.y),
-            w: s.C.w, h: s.C.h, color: "#ff9900", label: "C"
-          });
-        }
-
-        // Prefer drawing the dialog if we have it; otherwise draw just the B patch.
         if (v.dialog) {
           const imgDlg = captureRegion(v.dialog.x, v.dialog.y, v.dialog.w, v.dialog.h);
           if (imgDlg) {
-            const label = `LOCK A=${v.scores.A.toFixed(2)} B=${v.scores.B.toFixed(2)} edge=${edge.score.toFixed(2)}`;
+            const overlays = [];
+            if (s) {
+              overlays.push({ x: (v.ax - v.dialog.x), y: (v.ay - v.dialog.y), w: s.A.w, h: s.A.h, color: "#00ffff", label: "A" });
+              overlays.push({ x: (v.bRect.x - v.dialog.x), y: (v.bRect.y - v.dialog.y), w: s.B.w, h: s.B.h, color: "#00ff00", label: "B" });
+              overlays.push({ x: (v.ax + s.dxC - v.dialog.x), y: (v.ay + s.dyC - v.dialog.y), w: s.C.w, h: s.C.h, color: "#ff9900", label: "C" });
+            }
+            const label = `LOCK ${pctTxt} A=${v.scores.A.toFixed(2)} B=${v.scores.B.toFixed(2)} edge=${edge.score.toFixed(2)}`;
             drawImageScaled(imgDlg, label, overlays);
             lastGoodFrame = { img: imgDlg, label, overlays };
           }
         } else {
-          const label = `LOCK(B) A=${v.scores.A.toFixed(2)} B=${v.scores.B.toFixed(2)} edge=${edge.score.toFixed(2)}`;
+          const label = `LOCK(B) ${pctTxt} A=${v.scores.A.toFixed(2)} B=${v.scores.B.toFixed(2)} edge=${edge.score.toFixed(2)}`;
           drawImageScaled(imgB, label, []);
           lastGoodFrame = { img: imgB, label, overlays: [] };
         }
@@ -516,15 +512,16 @@
         return;
       }
 
-      // Unlocked path: show a small live preview (IDLE)
-      const rs = getRsRect();
-      if (!rs.w || !rs.h) return;
-
+      // Unlocked path: moving IDLE preview
       const area = getScanAreaConfig();
       const w = Math.min(560, area.x1 - area.x0);
       const h = Math.min(260, area.y1 - area.y0);
       const img = captureRegion(area.x0, area.y0, w, h);
-      if (img) drawImageScaled(img, `IDLE preview (${area.name})`, []);
+      drawImageScaled(img, `IDLE preview (${area.name})`, []);
+      if (!img) {
+        // If capture fails, show useful diag
+        if (window.progflashCaptureDiag) dbg({ idleCaptureFailed: true, diag: window.progflashCaptureDiag });
+      }
     }, 200);
   }
 
@@ -532,26 +529,22 @@
     if (captureTimer) { clearInterval(captureTimer); captureTimer = null; }
   }
 
-  // ---------------- Auto-find (fallback) ----------------
-  // Keep your existing workflow: Auto find clears lock and forces re-learn.
-  // This build’s main improvement is *post-lock robustness* and *progress accuracy*.
+  // ---------------- Auto-find ----------------
   function autoFind() {
     if (!running) start();
 
     del(LS_LOCK);
     del(LS_DIALOG);
-    window._pf_lastPct = null;
     lastGoodFrame = null;
+    lastPct = null;
     updateSavedLockLabel();
 
     setLock("none");
     setProgress("—");
-    setStatus("Auto find: open the crafting dialog, then wait for a lock...");
+    setStatus("Auto find: waiting for fast lock...");
 
-    // Minimal “scan”: try fast lock repeatedly for a short window.
-    // (Your previous build had a full rectangle scanner; this keeps behaviour simple while fixing your main issues.)
     const t0 = Date.now();
-    const maxMs = 6000;
+    const maxMs = 8000;
 
     const tick = () => {
       if (!running) return;
@@ -601,8 +594,8 @@
     del(LS_LOCK);
     del(LS_MULTI);
     del(LS_DIALOG);
-    window._pf_lastPct = null;
     lastGoodFrame = null;
+    lastPct = null;
 
     updateSavedLockLabel();
     setLock("none");
@@ -611,10 +604,11 @@
   }
 
   function testFlash() {
+    // Draw a small green box near top-left of RS client (RS-relative -> ABS overlay)
+    overlayRectRs(20, 20, 120, 60, 900);
+    // Also if we have a dialog rect, show it
     const d = load(LS_DIALOG);
-    if (d) { overlayRectOnScreen(d.x, d.y, d.w, d.h, 900); return; }
-    const rs = getRsRect();
-    overlayRectOnScreen(Math.floor(rs.w * 0.25), Math.floor(rs.h * 0.25), Math.floor(rs.w * 0.5), Math.floor(rs.h * 0.15), 900);
+    if (d) overlayRectRs(d.x, d.y, d.w, d.h, 900);
   }
 
   // ---------------- Init UI ----------------
@@ -623,6 +617,7 @@
   setStatus("Idle");
   setLock(load(LS_LOCK) ? "saved" : "none");
   setProgress("—");
+  dbg({ note: "app_final10: RS-relative capture; ABS overlay. Preview should move again." });
 
   if (startBtn) startBtn.onclick = start;
   if (stopBtn) stopBtn.onclick = stop;
@@ -630,8 +625,6 @@
   if (clearLockBtn) clearLockBtn.onclick = clearLock;
   if (testFlashBtn) testFlashBtn.onclick = testFlash;
 
-  dbg({
-    note: "app_final9: progress from learned B patch + per-tick A/B validation; avoids IDLE preview after lock.",
-    scanPreset: getScanPreset()
-  });
+  // Persist scan preset changes
+  getScanPreset();
 })();
