@@ -36,7 +36,7 @@
   const canvas = $("previewCanvas");
   const ctx = canvas ? canvas.getContext("2d", { willReadFrequently: true }) : null;
 
-  const APP_VERSION = "0.6.21";
+  const APP_VERSION = "0.6.22";
   const BUILD_ID = "final-" + Date.now();
 
   function setStatus(v) { if (statusEl) statusEl.textContent = v; }
@@ -324,7 +324,43 @@
     return best;
   }
 
-  // Cancel button detector (warm/orange band) – mild, acts as boost not hard requirement
+  
+  // Progress bar frame score: looks for a long horizontal bar-like band near a given y.
+  // Returns 0..1 where higher means "looks like a UI progress bar frame", not world geometry.
+  function scoreBarFrameAtY(img, yCenter) {
+    const w = img.width, h = img.height;
+    const y = clamp(yCenter|0, 2, h - 3);
+    let hits = 0, total = 0;
+
+    for (let x = 4; x < w - 4; x += 2) {
+      const i = (y * w + x) * 4;
+      const g = toGray(img.data[i], img.data[i+1], img.data[i+2]);
+
+      const iu = ((y - 2) * w + x) * 4;
+      const id = ((y + 2) * w + x) * 4;
+      const gu = toGray(img.data[iu], img.data[iu+1], img.data[iu+2]);
+      const gd = toGray(img.data[id], img.data[id+1], img.data[id+2]);
+
+      const vgrad = Math.abs(g - gu) + Math.abs(g - gd);
+      if (vgrad > 55) hits++;
+      total++;
+    }
+    const frac = total ? hits / total : 0;
+
+    let rough = 0, rc = 0;
+    for (let x = 6; x < w - 6; x += 3) {
+      const i1 = (y * w + x) * 4;
+      const i2 = (y * w + (x + 3)) * 4;
+      const g1 = toGray(img.data[i1], img.data[i1+1], img.data[i1+2]);
+      const g2 = toGray(img.data[i2], img.data[i2+1], img.data[i2+2]);
+      rough += Math.abs(g2 - g1);
+      rc++;
+    }
+    const roughN = rc ? (rough / rc) / 255 : 1;
+
+    return clamp(frac * (1 - roughN * 2.2), 0, 1);
+  }
+// Cancel button detector (warm/orange band) – mild, acts as boost not hard requirement
   function scoreCancelBand(img) {
     const w = img.width, h = img.height;
     const y0 = Math.floor(h * 0.70);
@@ -472,9 +508,22 @@
         const cancel2 = scoreCancelBand(img2);
         const close2 = scoreCloseX(img2);
 
-        const ok = (pb2.score >= PB.minScore) && (moved >= 2 || pb2.score >= 0.28) && (cancel2 >= 0.08 || close2 >= 0.10);
+        const pbFracX = pb2.xEdge / Math.max(1, (img2.width - 1));
+        const pbFracY = pb2.y / Math.max(1, (img2.height - 1));
+        const barFrame = scoreBarFrameAtY(img2, pb2.y);
 
-        resolve({ ok, pb: pb2.score, moved, cancel: cancel2, close: close2, img2 });
+        // Enforce B-inside-dialog meaningfully: bar must be in expected band and look like a UI bar.
+        const inBand = (pbFracY >= 0.52 && pbFracY <= 0.68);
+        const inX = (pbFracX >= 0.20 && pbFracX <= 0.85);
+        const looksLikeBar = (barFrame >= 0.07);
+
+        const ok =
+          (pb2.score >= PB.minScore) &&
+          (moved >= 2 || pb2.score >= 0.30) &&
+          (cancel2 >= 0.08 || close2 >= 0.10) &&
+          inBand && inX && looksLikeBar;
+
+        resolve({ ok, pb: pb2.score, moved, cancel: cancel2, close: close2, barFrame, pbFracX, pbFracY, img2 });
       }, SCAN.confirmDelayMs);
     });
   }
