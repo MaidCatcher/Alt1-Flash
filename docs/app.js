@@ -1,13 +1,16 @@
-// ProgFlash app_final11.js
-// Changes vs final10:
-// - Scan preset dropdown is wired explicitly at init; changes take effect immediately and update debug.
-// - "Test flash" no longer calls overlay directly inside the click handler (which can minimize/focus Alt1).
-//   Instead it sets a flag; the capture loop performs the overlay on the next tick.
-// - Adds an always-updating debug line showing the *current scan rect* (RS-relative) and capture diagnostics.
+// ProgFlash app_final12.js
+// Goals:
+// 1) Restore moving "stage scan / verify" preview by bringing back the fallback rectangle scan (tile cursor preview).
+// 2) Keep RS-relative capture everywhere (matcher.js captureRegion is RS-relative).
+// 3) Fix scan area dropdown wiring (scanPreset).
+// 4) Avoid Alt1 minimizing: screen overlay is OFF by default. "Test flash" toggles overlay mode.
+//    - If overlay mode is OFF: draws green boxes ONLY in the preview.
+//    - If overlay mode is ON: attempts Alt1 screen overlay (may minimize on some setups).
 //
-// Coordinate spaces:
-// - captureRegion(x,y,w,h) is RS-relative (matcher.js converts to absolute for Alt1 getRegionImage).
-// - overlayRect is absolute; we convert RS-relative -> absolute by adding alt1.rsX/alt1.rsY.
+// Notes from your diag:
+// - hasGetRegionImage=false so matcher.js uses alt1.getRegion (base64) which is OK.
+//
+// Dependencies: matcher.js provides captureRegion + findAnchor + progflashCaptureDiag.
 
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -34,15 +37,14 @@
   function setMode(v) { if (modeEl) modeEl.textContent = v; }
   function setLock(v) { if (lockEl) lockEl.textContent = v; }
   function setProgress(v) { if (progEl) progEl.textContent = v; }
-  function dbg(v) {
-    if (!dbgEl) return;
-    dbgEl.textContent = typeof v === "string" ? v : JSON.stringify(v, null, 2);
-  }
+  function dbg(v) { if (dbgEl) dbgEl.textContent = typeof v === "string" ? v : JSON.stringify(v, null, 2); }
 
-  const LS_LOCK   = "progflash.lockPos";         // {x,y} RS-relative
-  const LS_MULTI  = "progflash.multiAnchorABC";
-  const LS_DIALOG = "progflash.dialogRect";      // {x,y,w,h} RS-relative
-  const LS_SCAN   = "progflash.scanPreset";
+  // ---------- Storage ----------
+  const LS_LOCK   = "progflash.lockPos";         // {x,y} RS-relative anchor A
+  const LS_MULTI  = "progflash.multiAnchorABC";  // learned A/B/C needles + offsets + dialog dims
+  const LS_DIALOG = "progflash.dialogRect";      // {x,y,w,h} RS-relative dialog rect
+  const LS_SCAN   = "progflash.scanPreset";      // "top|mid|bot|full"
+  const LS_OVL    = "progflash.overlayEnabled";  // "1" or "0"
 
   function save(key, obj) { try { localStorage.setItem(key, JSON.stringify(obj)); } catch {} }
   function load(key) { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } }
@@ -54,7 +56,11 @@
     savedLockEl.textContent = p ? `x=${p.x},y=${p.y}` : "none";
   }
 
+  // ---------- Helpers ----------
   function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
+
+  function getRsSize() { return { w: alt1.rsWidth || 0, h: alt1.rsHeight || 0 }; }
+  function getRsOffset() { return { x: alt1.rsX || 0, y: alt1.rsY || 0 }; }
 
   function rgba(r, g, b, a = 255) {
     return (r & 255) | ((g & 255) << 8) | ((b & 255) << 16) | ((a & 255) << 24);
@@ -100,17 +106,16 @@
     return out;
   }
 
-  function getRsSize() {
-    return { w: alt1.rsWidth || 0, h: alt1.rsHeight || 0 };
+  // ---------- Overlay ----------
+  function overlayEnabled() {
+    try { return localStorage.getItem(LS_OVL) === "1"; } catch { return false; }
   }
-  function getRsOffset() {
-    return { x: alt1.rsX || 0, y: alt1.rsY || 0 };
+  function setOverlayEnabled(v) {
+    try { localStorage.setItem(LS_OVL, v ? "1" : "0"); } catch {}
   }
 
-  // ---------- Overlay (absolute) ----------
   function overlayRectAbs(absX, absY, w, h, ms = 900) {
     try {
-      if (!window.alt1) return false;
       const colorNum = 0x00ff00;
       if (typeof alt1.overLayRect === "function") { alt1.overLayRect(absX, absY, w, h, colorNum, 2, ms); return true; }
       if (typeof alt1.overLayRectEx === "function") { alt1.overLayRectEx(absX, absY, w, h, colorNum, 2, ms); return true; }
@@ -126,16 +131,8 @@
     return overlayRectAbs(o.x + rsX, o.y + rsY, w, h, ms);
   }
 
-  let lastOverlayAt = 0;
-  function overlayRectRsThrottled(rsX, rsY, w, h, ms = 900, minGapMs = 800) {
-    const now = Date.now();
-    if (now - lastOverlayAt < minGapMs) return false;
-    lastOverlayAt = now;
-    return overlayRectRs(rsX, rsY, w, h, ms);
-  }
-
-  // ---------- Preview ----------
-  function drawImageScaled(img, label) {
+  // ---------- Preview drawing ----------
+  function drawImageScaled(img, label, overlayRects) {
     if (!ctx || !canvas) return;
 
     if (!img) {
@@ -173,11 +170,29 @@
       ctx.font = "12px Arial";
       ctx.fillText(label, 12, 21);
     }
+
+    if (overlayRects && overlayRects.length) {
+      ctx.lineWidth = 2;
+      overlayRects.forEach(r => {
+        const fx = ox + Math.floor(r.x * scale);
+        const fy = oy + Math.floor(r.y * scale);
+        const fw = Math.floor(r.w * scale);
+        const fh = Math.floor(r.h * scale);
+        ctx.strokeStyle = r.color || "lime";
+        ctx.strokeRect(fx, fy, fw, fh);
+        if (r.label) {
+          ctx.fillStyle = r.color || "lime";
+          ctx.font = "12px Arial";
+          ctx.fillText(r.label, fx + 3, fy - 4);
+        }
+      });
+    }
   }
 
-  // ---------- Scan preset (explicit wiring) ----------
+  // ---------- Scan preset ----------
   function getScanPreset() {
-    const v = (scanPresetEl && scanPresetEl.value) || load(LS_SCAN) || "top";
+    const saved = (() => { try { return localStorage.getItem(LS_SCAN); } catch { return null; } })();
+    const v = (scanPresetEl && scanPresetEl.value) || saved || "top";
     return v || "top";
   }
 
@@ -206,273 +221,356 @@
     };
   }
 
-  // ---------- Progress from learned B patch ----------
-  function barEdgeFromPatch(img) {
-    if (!img || img.width < 40 || img.height < 8) return { ok: false, edgeX: 0, score: 0 };
+  // ---------- Fallback rectangle scanning (moving preview) ----------
+  const TILE = { w: 640, h: 360 };
 
-    const w = img.width, h = img.height;
-    const y0 = Math.floor(h * 0.25);
-    const y1 = Math.floor(h * 0.75);
+  const DIALOG_SIZES = [
+    { w: 520, h: 200 },
+    { w: 500, h: 190 },
+    { w: 480, h: 180 }
+  ];
 
-    function grayAt(x, y) {
-      const i = (y * w + x) * 4;
-      const r = img.data[i], g = img.data[i + 1], b = img.data[i + 2];
-      return (r * 77 + g * 150 + b * 29) >> 8;
-    }
+  const PB = { minScore: 0.20 };
 
-    const col = new Float32Array(w);
-    for (let x = 0; x < w; x++) {
-      let s = 0, c = 0;
-      for (let y = y0; y < y1; y++) { s += grayAt(x, y); c++; }
-      col[x] = c ? (s / c) : 0;
-    }
+  const SCAN = {
+    step: 12,
+    shortlist: 5,
+    earlyExitComb: 0.88,
+    confirmDelayMs: 180
+  };
 
-    let bestG = 0;
-    let bestX = Math.floor(w * 0.5);
-    for (let x = 2; x < w - 2; x++) {
-      const g = Math.abs(col[x] - col[x - 1]) + Math.abs(col[x + 1] - col[x]);
-      if (g > bestG) { bestG = g; bestX = x; }
-    }
+  let scanActive = false;
+  let scanTimer = null;
 
-    const frac = bestX / Math.max(1, w - 1);
-    if (frac < 0.08 || frac > 0.95) return { ok: false, edgeX: bestX, score: bestG / 255 };
+  function stopTimers() { if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; } }
+  function schedule(ms, fn) { stopTimers(); scanTimer = setTimeout(fn, ms); }
 
-    const score = clamp(bestG / 255, 0, 1);
-    return { ok: score >= 0.12, edgeX: bestX, score };
+  let scanCursor = null;
+
+  function resetScan() {
+    const area = getScanAreaConfig();
+    scanCursor = {
+      area,
+      tx: area.x0,
+      ty: area.y0,
+      tileIndex: 0,
+      best: []
+    };
   }
 
-  // ---------- Fast lock ----------
-  function tryTripleAnchorFastLock() {
-    const s = load(LS_MULTI);
-    if (!s) return false;
+  function pushBest(arr, c) {
+    arr.push(c);
+    arr.sort((a, b) => b.comb - a.comb);
+    if (arr.length > SCAN.shortlist) arr.length = SCAN.shortlist;
+  }
 
-    const A = makeNeedle(s.A.w, s.A.h, b64ToBytes(s.A.b64));
-    const B = makeNeedle(s.B.w, s.B.h, b64ToBytes(s.B.b64));
-    const C = makeNeedle(s.C.w, s.C.h, b64ToBytes(s.C.b64));
+  function captureTile(tx, ty, tw, th) {
+    const img = captureRegion(tx, ty, tw, th);
+    if (img) { img._tileX = tx; img._tileY = ty; }
+    return img;
+  }
 
-    const area = getScanAreaConfig();
-    const searchRect = { x: area.x0, y: area.y0, w: area.x1 - area.x0, h: area.y1 - area.y0 };
-    const searchImg = captureRegion(searchRect.x, searchRect.y, searchRect.w, searchRect.h);
-    if (!searchImg) return false;
+  function scoreProgressBar(sub) {
+    const w = sub.width, h = sub.height;
+    const y0 = Math.floor(h * 0.45);
+    const y1 = Math.floor(h * 0.70);
 
-    const mA = findAnchor(searchImg, A, { tolerance: 55, step: 2, minScore: 0.02 });
-    if (!mA?.ok || mA.score < 0.72) return false;
+    let bestRow = { score: 0, y: Math.floor(h * 0.55), xEdge: 0 };
 
-    const ax = (searchRect.x + mA.x) | 0;
-    const ay = (searchRect.y + mA.y) | 0;
+    for (let y = y0; y < y1; y += 2) {
+      let hits = 0, total = 0;
+      let lastHitX = 0;
 
-    const bx = (ax + s.dxB) | 0, by = (ay + s.dyB) | 0;
-    const cx = (ax + s.dxC) | 0, cy = (ay + s.dyC) | 0;
+      for (let x = Math.floor(w * 0.10); x < Math.floor(w * 0.90); x += 2) {
+        const i = (y * w + x) * 4;
+        const r = sub.data[i], g = sub.data[i + 1], b = sub.data[i + 2];
+        total++;
+        const isGreen = (g > 120 && g > r + 25 && g > b + 25);
+        if (isGreen) { hits++; lastHitX = x; }
+      }
 
-    // Containment gate
-    if (s.dialogW && s.dialogH && typeof s.Ax === "number" && typeof s.Ay === "number") {
-      const dialogX = ax - s.Ax;
-      const dialogY = ay - s.Ay;
-      const padIn = 10;
-
-      const inside = (x, y, w, h) =>
-        (x >= dialogX - padIn) &&
-        (y >= dialogY - padIn) &&
-        (x + w <= dialogX + s.dialogW + padIn) &&
-        (y + h <= dialogY + s.dialogH + padIn);
-
-      if (!inside(bx, by, s.B.w, s.B.h) || !inside(cx, cy, s.C.w, s.C.h)) return false;
+      const score = total ? (hits / total) : 0;
+      if (score > bestRow.score) bestRow = { score, y, xEdge: lastHitX };
     }
 
-    const pad = 8;
-    const imgB = captureRegion(bx - pad, by - pad, s.B.w + pad * 2, s.B.h + pad * 2);
-    if (!imgB) return false;
-    const mB = findAnchor(imgB, B, { tolerance: 55, step: 1, minScore: 0.02 });
-    if (!mB?.ok || mB.score < 0.70) return false;
+    return bestRow;
+  }
 
-    const imgC = captureRegion(cx - pad, cy - pad, s.C.w + pad * 2, s.C.h + pad * 2);
-    const mC = imgC ? findAnchor(imgC, C, { tolerance: 60, step: 1, minScore: 0.02 }) : null;
-    const cOK = !!(mC?.ok && mC.score >= 0.65);
+  function scoreCancelBand(sub) {
+    const w = sub.width, h = sub.height;
+    const y0 = Math.floor(h * 0.78);
+    const y1 = Math.floor(h * 0.95);
 
-    if (!cOK && !(mA.score >= 0.80 && mB.score >= 0.78)) return false;
-
-    save(LS_LOCK, { x: ax, y: ay });
-    updateSavedLockLabel();
-
-    if (s.dialogW && s.dialogH) {
-      const dialogX = (ax - (s.Ax || 0)) | 0;
-      const dialogY = (ay - (s.Ay || 0)) | 0;
-      const d = { x: dialogX, y: dialogY, w: s.dialogW|0, h: s.dialogH|0 };
-      save(LS_DIALOG, d);
-      overlayRectRsThrottled(d.x, d.y, d.w, d.h, 900, 400);
+    let hits = 0, total = 0;
+    for (let y = y0; y < y1; y += 2) {
+      for (let x = Math.floor(w * 0.25); x < Math.floor(w * 0.75); x += 2) {
+        const i = (y * w + x) * 4;
+        const r = sub.data[i], g = sub.data[i + 1], b = sub.data[i + 2];
+        total++;
+        const isOrange = (r > 120 && g > 70 && b < 80 && r > g + 15);
+        if (isOrange) hits++;
+      }
     }
+    return total ? hits / total : 0;
+  }
 
-    setLock(`x=${ax}, y=${ay}`);
-    setStatus("Locked (fast)");
-    setProgress("locked");
-    drawImageScaled(searchImg, `FAST A=${mA.score.toFixed(2)} B=${mB.score.toFixed(2)} C=${cOK ? "ok" : "—"}`);
+  function scoreCloseX(sub) {
+    const w = sub.width, h = sub.height;
+    const x0 = Math.floor(w * 0.84);
+    const y0 = Math.floor(h * 0.05);
+    const x1 = Math.floor(w * 0.98);
+    const y1 = Math.floor(h * 0.22);
+
+    let hits = 0, total = 0;
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const i = (y * w + x) * 4;
+        const r = sub.data[i], g = sub.data[i + 1], b = sub.data[i + 2];
+        total++;
+        const bright = (r + g + b) > 650;
+        if (bright) hits++;
+      }
+    }
+    return total ? hits / total : 0;
+  }
+
+  function scoreDialogCandidate(tileImg, rx, ry, rw, rh) {
+    const sub = { width: rw, height: rh, data: cropRGBA(tileImg, rx, ry, rw, rh) };
+
+    const pb = scoreProgressBar(sub);
+    const cancel = scoreCancelBand(sub);
+    const close = scoreCloseX(sub);
+
+    const comb = pb.score * 0.75 + Math.max(cancel * 0.6, close * 0.9) * 0.25;
+    return { pb: pb.score, pbY: pb.y, pbXEdge: pb.xEdge, cancel, close, comb };
+  }
+
+  function scanTileForCandidates(tileImg) {
+    const out = [];
+    const tw = tileImg.width, th = tileImg.height;
+
+    for (const sz of DIALOG_SIZES) {
+      const rw = Math.min(sz.w, tw);
+      const rh = Math.min(sz.h, th);
+      if (rw < 320 || rh < 140) continue;
+
+      for (let y = 0; y <= th - rh; y += SCAN.step) {
+        for (let x = 0; x <= tw - rw; x += SCAN.step) {
+          const s = scoreDialogCandidate(tileImg, x, y, rw, rh);
+          if (s.pb < PB.minScore) continue;
+
+          const c = {
+            absRect: { x: tileImg._tileX + x, y: tileImg._tileY + y, w: rw, h: rh },
+            relRect: { x, y, w: rw, h: rh },
+            ...s
+          };
+          out.push(c);
+
+          if (s.comb >= SCAN.earlyExitComb) {
+            return { candidates: out, early: c };
+          }
+        }
+      }
+    }
+    return { candidates: out, early: null };
+  }
+
+  function confirmCandidate(c) {
+    const r = c.absRect;
+    const img1 = captureRegion(r.x, r.y, r.w, r.h);
+    if (!img1) return Promise.resolve({ ok: false });
+
+    const pb1 = scoreProgressBar(img1);
+
+    return new Promise(resolve => {
+      setTimeout(() => {
+        const img2 = captureRegion(r.x, r.y, r.w, r.h);
+        if (!img2) { resolve({ ok: false }); return; }
+
+        const pb2 = scoreProgressBar(img2);
+        const moved = Math.abs(pb2.xEdge - pb1.xEdge);
+        const cancel2 = scoreCancelBand(img2);
+        const close2 = scoreCloseX(img2);
+
+        const pbFracY = pb2.y / Math.max(1, (img2.height - 1));
+        const inBand = (pbFracY >= 0.45 && pbFracY <= 0.72);
+
+        const ok =
+          (pb2.score >= PB.minScore) &&
+          (moved >= 2 || pb2.score >= 0.30) &&
+          (cancel2 >= 0.07 || close2 >= 0.07) &&
+          inBand;
+
+        resolve({ ok, pb: pb2.score, moved, cancel: cancel2, close: close2, img2 });
+      }, SCAN.confirmDelayMs);
+    });
+  }
+
+  function learnTripleAnchorFromDialog(dialogRsRect) {
+    const img = captureRegion(dialogRsRect.x, dialogRsRect.y, dialogRsRect.w, dialogRsRect.h);
+    if (!img) return false;
+
+    const Aw = 80, Ah = 28;
+    const Ax = img.width - Aw - 20;
+    const Ay = 10;
+
+    const Bw = 140, Bh = 20;
+    const Bx = Math.floor((img.width - Bw) / 2);
+    const By = Math.floor(img.height * 0.55);
+
+    const Cw = 26, Ch = 26;
+    const Cx = img.width - Cw - 10;
+    const Cy = 10;
+
+    const bytesA = cropRGBA(img, Ax, Ay, Aw, Ah);
+    const bytesB = cropRGBA(img, Bx, By, Bw, Bh);
+    const bytesC = cropRGBA(img, Cx, Cy, Cw, Ch);
+
+    save(LS_MULTI, {
+      A: { w: Aw, h: Ah, b64: bytesToB64(bytesA) },
+      B: { w: Bw, h: Bh, b64: bytesToB64(bytesB) },
+      C: { w: Cw, h: Ch, b64: bytesToB64(bytesC) },
+      dxB: (Bx - Ax), dyB: (By - Ay),
+      dxC: (Cx - Ax), dyC: (Cy - Ay),
+      dialogW: img.width, dialogH: img.height,
+      Ax, Ay
+    });
 
     return true;
   }
 
-  function validateLockAndGetRects() {
-    const s = load(LS_MULTI);
-    const lock = load(LS_LOCK);
-    if (!s || !lock) return { ok: false, reason: "no_state" };
+  function scanTick() {
+    if (!running || !scanActive || !scanCursor) return;
 
-    const A = makeNeedle(s.A.w, s.A.h, b64ToBytes(s.A.b64));
-    const B = makeNeedle(s.B.w, s.B.h, b64ToBytes(s.B.b64));
-
-    const ax = lock.x|0, ay = lock.y|0;
-    const bx = (ax + s.dxB)|0, by = (ay + s.dyB)|0;
-
-    const padA = 6;
-    const imgA = captureRegion(ax - padA, ay - padA, s.A.w + padA * 2, s.A.h + padA * 2);
-    if (!imgA) return { ok: false, reason: "capA_null" };
-    const mA = findAnchor(imgA, A, { tolerance: 58, step: 1, minScore: 0.02 });
-    if (!mA?.ok || mA.score < 0.66) return { ok: false, reason: "A_miss", mA };
-
-    const padB = 6;
-    const imgB = captureRegion(bx - padB, by - padB, s.B.w + padB * 2, s.B.h + padB * 2);
-    if (!imgB) return { ok: false, reason: "capB_null", mA };
-    const mB = findAnchor(imgB, B, { tolerance: 58, step: 1, minScore: 0.02 });
-    if (!mB?.ok || mB.score < 0.64) return { ok: false, reason: "B_miss", mA, mB };
-
-    const dialogX = (ax - (s.Ax || 0)) | 0;
-    const dialogY = (ay - (s.Ay || 0)) | 0;
-    const dialogW = (s.dialogW || 0) | 0;
-    const dialogH = (s.dialogH || 0) | 0;
-
-    return {
-      ok: true,
-      dialog: dialogW && dialogH ? { x: dialogX, y: dialogY, w: dialogW, h: dialogH } : null,
-      bRect: { x: bx, y: by, w: s.B.w|0, h: s.B.h|0 },
-      scores: { A: mA.score, B: mB.score }
-    };
-  }
-
-  // ---------- Loop ----------
-  let running = false;
-  let timer = null;
-  let lastGood = null;
-  let lastPct = null;
-
-  // "Test flash" requested flag (handled in loop to avoid minimizing/focus issues)
-  let flashRequest = 0;
-
-  function loopTick() {
-    const diag = window.progflashCaptureDiag || {};
     const area = getScanAreaConfig();
-
-    // Handle deferred test flash here (not in click handler)
-    if (flashRequest) {
-      flashRequest = 0;
-      // Flash RS top-left and, if present, current dialog
-      overlayRectRsThrottled(20, 20, 140, 70, 900, 0);
-      const d = load(LS_DIALOG);
-      if (d) overlayRectRsThrottled(d.x, d.y, d.w, d.h, 900, 0);
-    }
-
-    const hasLock = !!load(LS_LOCK);
-    if (hasLock) {
-      const v = validateLockAndGetRects();
-      if (!v.ok) {
-        setStatus(`LOCKED (lost) ${v.reason}`);
-        setProgress("—");
-        if (lastGood) drawImageScaled(lastGood.img, lastGood.label);
-        dbg({
-          note: "locked-lost",
-          reason: v.reason,
-          scanPreset: getScanPreset(),
-          scanRect: { x: area.x0, y: area.y0, w: area.x1 - area.x0, h: area.y1 - area.y0 },
-          captureDiag: diag
-        });
-        return;
-      }
-
-      if (v.dialog) {
-        save(LS_DIALOG, v.dialog);
-        // green box where it's locked onto
-        overlayRectRsThrottled(v.dialog.x, v.dialog.y, v.dialog.w, v.dialog.h, 800, 900);
-      }
-
-      const imgB = captureRegion(v.bRect.x, v.bRect.y, v.bRect.w, v.bRect.h);
-      if (!imgB) {
-        setStatus("LOCKED (capture failed)");
-        if (lastGood) drawImageScaled(lastGood.img, lastGood.label);
-        dbg({
-          note: "locked-capture-failed",
-          scanPreset: getScanPreset(),
-          scanRect: { x: area.x0, y: area.y0, w: area.x1 - area.x0, h: area.y1 - area.y0 },
-          captureDiag: diag
-        });
-        return;
-      }
-
-      const edge = barEdgeFromPatch(imgB);
-      if (edge.ok) {
-        const pct = clamp(edge.edgeX / Math.max(1, imgB.width - 1), 0, 1);
-        const pctTxt = Math.round(pct * 100) + "%";
-        setStatus("Locked");
-        setProgress(pctTxt);
-
-        if (v.dialog && pct >= 0.985) overlayRectRsThrottled(v.dialog.x, v.dialog.y, v.dialog.w, v.dialog.h, 900, 500);
-        else if (v.dialog && lastPct !== null && Math.abs(pct - lastPct) >= 0.12) overlayRectRsThrottled(v.dialog.x, v.dialog.y, v.dialog.w, v.dialog.h, 450, 500);
-
-        lastPct = pct;
-
-        if (v.dialog) {
-          const imgDlg = captureRegion(v.dialog.x, v.dialog.y, v.dialog.w, v.dialog.h);
-          if (imgDlg) {
-            const label = `LOCK ${pctTxt} A=${v.scores.A.toFixed(2)} B=${v.scores.B.toFixed(2)} edge=${edge.score.toFixed(2)}`;
-            drawImageScaled(imgDlg, label);
-            lastGood = { img: imgDlg, label };
-          }
-        } else {
-          const label = `LOCK(B) ${pctTxt} edge=${edge.score.toFixed(2)}`;
-          drawImageScaled(imgB, label);
-          lastGood = { img: imgB, label };
-        }
-      } else {
-        setStatus("LOCKED (bar edge weak)");
-        setProgress("—");
-        const label = `LOCK(B) edge weak (score=${edge.score.toFixed(2)})`;
-        drawImageScaled(imgB, label);
-        lastGood = { img: imgB, label };
-      }
-
-      dbg({
-        note: "locked",
-        scanPreset: getScanPreset(),
-        scanRect: { x: area.x0, y: area.y0, w: area.x1 - area.x0, h: area.y1 - area.y0 },
-        dialog: load(LS_DIALOG),
-        captureDiag: diag
-      });
+    if (scanCursor.area.name !== area.name) {
+      resetScan();
+      setStatus(`Auto-finding (scan restart: ${area.name})...`);
+      schedule(0, scanTick);
       return;
     }
 
-    // Unlocked preview: show actual scan region capture so changing the preset should visibly change the preview.
-    const w = Math.min(560, area.x1 - area.x0);
-    const h = Math.min(260, area.y1 - area.y0);
-    const img = captureRegion(area.x0, area.y0, w, h);
+    if (scanCursor.best.length) {
+      const c = scanCursor.best.shift();
+      setStatus(`Confirming… (pb=${c.pb.toFixed(2)} comb=${c.comb.toFixed(2)})`);
 
-    drawImageScaled(img, `IDLE (${area.name}) scan x=${area.x0} y=${area.y0} w=${w} h=${h}`);
-    dbg({
-      note: "idle",
-      scanPreset: getScanPreset(),
-      scanRect: { x: area.x0, y: area.y0, w: area.x1 - area.x0, h: area.y1 - area.y0 },
-      captureDiag: diag
-    });
+      confirmCandidate(c).then(conf => {
+        if (!running || !scanActive) return;
+
+        if (conf.ok) {
+          save(LS_DIALOG, c.absRect);
+          learnTripleAnchorFromDialog(c.absRect);
+
+          const s = load(LS_MULTI);
+          if (s && typeof s.Ax === "number" && typeof s.Ay === "number") {
+            save(LS_LOCK, { x: (c.absRect.x + s.Ax)|0, y: (c.absRect.y + s.Ay)|0 });
+            updateSavedLockLabel();
+            setLock(`x=${(c.absRect.x + s.Ax)|0}, y=${(c.absRect.y + s.Ay)|0}`);
+          } else {
+            setLock("learned");
+          }
+
+          setProgress("locked");
+          setStatus("Locked (from scan confirm)");
+          scanActive = false;
+
+          drawImageScaled(conf.img2, `CONFIRMED OK pb=${conf.pb.toFixed(2)}`,
+            [{ x: 0, y: 0, w: c.absRect.w, h: c.absRect.h, color: "lime", label: "dialog" }]
+          );
+
+          if (overlayEnabled()) overlayRectRs(c.absRect.x, c.absRect.y, c.absRect.w, c.absRect.h, 900);
+          return;
+        }
+
+        setStatus("Confirm failed (continuing scan)...");
+        schedule(0, scanTick);
+      });
+
+      return;
+    }
+
+    const tx = scanCursor.tx;
+    const ty = scanCursor.ty;
+
+    const tw = Math.min(TILE.w, area.x1 - tx);
+    const th = Math.min(TILE.h, area.y1 - ty);
+
+    const img = captureTile(tx, ty, tw, th);
+    scanCursor.tileIndex++;
+
+    if (img) {
+      const { candidates, early } = scanTileForCandidates(img);
+
+      let bestInTile = null;
+      if (candidates.length) {
+        bestInTile = candidates.reduce((a, b) => (b.comb > a.comb ? b : a));
+        pushBest(scanCursor.best, bestInTile);
+      }
+
+      drawImageScaled(
+        img,
+        `SCAN tile#${scanCursor.tileIndex} preset=${area.name} best=${bestInTile ? bestInTile.comb.toFixed(2) : "—"} overlay=${overlayEnabled() ? "ON" : "OFF"}`,
+        bestInTile ? [{ x: bestInTile.relRect.x, y: bestInTile.relRect.y, w: bestInTile.relRect.w, h: bestInTile.relRect.h, color: "orange", label: "candidate" }] : []
+      );
+
+      if (early) pushBest(scanCursor.best, early);
+    } else {
+      drawImageScaled(null, `SCAN tile#${scanCursor.tileIndex} capture failed`);
+    }
+
+    scanCursor.tx += TILE.w;
+    if (scanCursor.tx >= area.x1) {
+      scanCursor.tx = area.x0;
+      scanCursor.ty += TILE.h;
+    }
+
+    if (scanCursor.ty >= area.y1) {
+      setStatus("Auto find timed out (try changing Scan area preset)");
+      scanActive = false;
+      return;
+    }
+
+    schedule(12, scanTick);
   }
 
-  function startLoop() {
-    if (timer) return;
-    timer = setInterval(() => {
+  function startAutoFindInternal() {
+    if (!running) return;
+    scanActive = true;
+    setStatus("Auto-finding (fallback scan)...");
+    setProgress("—");
+    resetScan();
+    schedule(0, scanTick);
+  }
+
+  // ---------- Idle capture loop ----------
+  let captureTimer = null;
+  function startCaptureLoop() {
+    if (captureTimer) return;
+    captureTimer = setInterval(() => {
       if (!running) return;
-      loopTick();
-    }, 200);
+
+      const area = getScanAreaConfig();
+      const w = Math.min(560, area.x1 - area.x0);
+      const h = Math.min(260, area.y1 - area.y0);
+      const img = captureRegion(area.x0, area.y0, w, h);
+
+      if (!scanActive) drawImageScaled(img, `IDLE (${area.name}) overlay=${overlayEnabled() ? "ON" : "OFF"}`, []);
+
+      dbg({
+        note: scanActive ? "scan_active" : "idle",
+        scanPreset: area.name,
+        scanRect: { x: area.x0, y: area.y0, w: area.x1 - area.x0, h: area.y1 - area.y0 },
+        captureDiag: window.progflashCaptureDiag || {},
+        overlayEnabled: overlayEnabled()
+      });
+    }, 220);
   }
 
-  function stopLoop() {
-    if (timer) { clearInterval(timer); timer = null; }
+  function stopCaptureLoop() {
+    if (captureTimer) { clearInterval(captureTimer); captureTimer = null; }
   }
 
-  // ---------- Actions ----------
+  // ---------- Buttons ----------
   function start() {
     if (!window.alt1) { setStatus("Alt1 missing"); dbg("Open inside Alt1."); return; }
     if (!alt1.permissionPixel) { setStatus("No pixel permission"); dbg("Enable pixel permission."); return; }
@@ -482,23 +580,22 @@
       return;
     }
 
-    // Ensure dropdown reflects stored preset on boot
-    const stored = load(LS_SCAN);
-    if (scanPresetEl && stored) scanPresetEl.value = stored;
+    const saved = (() => { try { return localStorage.getItem(LS_SCAN); } catch { return null; } })();
+    if (scanPresetEl && saved) scanPresetEl.value = saved;
 
     running = true;
     setMode("Running");
     setProgress("—");
-    startLoop();
+    startCaptureLoop();
 
-    setStatus("Fast lock...");
-    if (tryTripleAnchorFastLock()) return;
     setStatus("Idle (press Auto find)");
   }
 
   function stop() {
     running = false;
-    stopLoop();
+    scanActive = false;
+    stopTimers();
+    stopCaptureLoop();
     setMode("Not running");
     setStatus("Idle");
     setProgress("—");
@@ -506,41 +603,17 @@
 
   function autoFind() {
     if (!running) start();
-
     del(LS_LOCK);
     del(LS_DIALOG);
-    lastGood = null;
-    lastPct = null;
     updateSavedLockLabel();
-
     setLock("none");
-    setProgress("—");
-    setStatus("Auto find: waiting for fast lock...");
-
-    const t0 = Date.now();
-    const maxMs = 10000;
-
-    const tick = () => {
-      if (!running) return;
-      if (load(LS_LOCK)) return;
-      if (tryTripleAnchorFastLock()) return;
-
-      if (Date.now() - t0 > maxMs) {
-        setStatus("Auto find timed out (try changing Scan area preset)");
-        return;
-      }
-      setTimeout(tick, 250);
-    };
-    tick();
+    startAutoFindInternal();
   }
 
   function clearLock() {
     del(LS_LOCK);
     del(LS_MULTI);
     del(LS_DIALOG);
-    lastGood = null;
-    lastPct = null;
-
     updateSavedLockLabel();
     setLock("none");
     setStatus("Cleared");
@@ -548,28 +621,37 @@
   }
 
   function testFlash() {
-    // DO NOT overlay directly here (can minimize/focus Alt1 on some setups).
-    // Defer to loop tick.
-    flashRequest = Date.now();
-    setStatus("Test flash requested");
+    const now = !overlayEnabled();
+    setOverlayEnabled(now);
+    setStatus(`Overlay mode: ${now ? "ON (may minimize)" : "OFF (preview only)"}`);
+
+    const area = getScanAreaConfig();
+    const w = Math.min(560, area.x1 - area.x0);
+    const h = Math.min(260, area.y1 - area.y0);
+    const img = captureRegion(area.x0, area.y0, w, h);
+
+    drawImageScaled(img, `TEST (${area.name}) overlay=${now ? "ON" : "OFF"}`,
+      [{ x: 10, y: 10, w: 120, h: 60, color: "lime", label: "test" }]
+    );
+
+    if (now) overlayRectRs(20, 20, 140, 70, 900);
   }
 
   // ---------- Init ----------
   updateSavedLockLabel();
   setMode("Not running");
   setStatus("Idle");
-  setLock(load(LS_LOCK) ? "saved" : "none");
+  setLock("none");
   setProgress("—");
 
-  // Wire scan preset dropdown explicitly
   if (scanPresetEl) {
-    const stored = load(LS_SCAN);
-    if (stored) scanPresetEl.value = stored;
+    const saved = (() => { try { return localStorage.getItem(LS_SCAN); } catch { return null; } })();
+    if (saved) scanPresetEl.value = saved;
 
     scanPresetEl.addEventListener("change", () => {
       setScanPreset(scanPresetEl.value);
-      // force immediate label update in debug/preview next tick
       setStatus(`Scan area set: ${scanPresetEl.value}`);
+      if (scanActive) resetScan();
     });
   }
 
@@ -580,7 +662,8 @@
   if (testFlashBtn) testFlashBtn.onclick = testFlash;
 
   dbg({
-    note: "app_final11: fixed scan preset wiring; deferred test flash to avoid minimizing; shows scanRect in debug.",
-    scanPreset: getScanPreset()
+    note: "app_final12: fallback scan restored (moving preview). Test flash toggles overlay mode to avoid minimize.",
+    scanPreset: getScanPreset(),
+    overlayEnabled: overlayEnabled()
   });
 })();
