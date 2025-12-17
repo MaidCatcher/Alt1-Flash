@@ -248,8 +248,8 @@
   ];
 
   // Progress-bar scoring thresholds.
-  // If it struggles to find the bar, try lowering minScore slightly.
-  const PB = { minScore: 0.14 };
+  // Raised to avoid false positives - we want a very clear, uniform bar.
+  const PB = { minScore: 0.30 };
 
   const SCAN = {
     // Smaller step -> denser search, better chance to hit the bar at cost of CPU.
@@ -435,7 +435,7 @@
     const needle = makeNeedle(tpl.w, tpl.h, bytes);
 
     const match = window.findAnchor(hay, needle, {
-      minScore: 0.70,
+      minScore: 0.80,  // Raised threshold - template must match very well
       step: 2,
       ignoreAlphaBelow: 0
     });
@@ -526,13 +526,13 @@
         // Slightly wider vertical band and looser movement threshold.
         const inBand = (pbFracY >= 0.40 && pbFracY <= 0.78);
 
+        // Much stricter confirmation: require actual bar movement AND high scores.
         const ok =
           (pb2.score >= PB.minScore) &&
-          (moved >= 1 || pb2.score >= 0.22) &&
-          // Require a reasonable fraction of bright pixels in the close "X" area,
-          // but don't depend on any specific cancel color.
-          (close2 >= 0.05) &&
-          inBand;
+          (moved >= 3 || pb2.score >= 0.50) &&  // Bar must move significantly OR be very strong
+          (close2 >= 0.10) &&  // Stronger X requirement
+          inBand &&
+          (pb2.score >= 0.30);  // Double-check minimum bar score
 
         // Expose extra diagnostics for tricky cases.
         try {
@@ -748,7 +748,7 @@
     // Phase 1: if we have a learned bar template, try that first.
     setStatus("Auto-finding (bar template)...");
     const tplHit = autoFindWithBarTemplate();
-    if (tplHit && tplHit.dialogRect && tplHit.matchScore >= 0.72) {
+    if (tplHit && tplHit.dialogRect && tplHit.matchScore >= 0.80) {
       const dlg = tplHit.dialogRect;
       const conf = await confirmCandidate({ absRect: dlg, relRect: { x: 0, y: 0, w: dlg.w, h: dlg.h }, pb: 1, comb: 1 });
 
@@ -809,18 +809,22 @@
       });
     } catch {}
 
-    if (!best || best.pb < PB.minScore) {
-      drawImageScaled(img, "AUTO FIND: no strong progress dialog candidate", []);
-      setStatus("No progress dialog found (try moving RS window)");
+    if (!best || best.pb < PB.minScore || best.comb < 0.50) {
+      drawImageScaled(img, `AUTO FIND: no strong candidate (pb=${best ? best.pb.toFixed(2) : "0"}, comb=${best ? best.comb.toFixed(2) : "0"})`, []);
+      setStatus(`No progress dialog found (pb=${best ? best.pb.toFixed(2) : "0"} < ${PB.minScore}, comb=${best ? best.comb.toFixed(2) : "0"} < 0.50)`);
       scanActive = false;
       return;
     }
 
+    // Show candidate in preview and wait a moment so user can see what we're about to lock.
     drawImageScaled(
       img,
-      `AUTO FIND candidate pb=${best.pb.toFixed(2)} comb=${best.comb.toFixed(2)}`,
+      `AUTO FIND candidate pb=${best.pb.toFixed(2)} comb=${best.comb.toFixed(2)} (confirming...)`,
       [{ x: best.absRect.x, y: best.absRect.y, w: best.absRect.w, h: best.absRect.h, color: "orange", label: "candidate" }]
     );
+    
+    // Add a small delay so user can see the candidate before we confirm.
+    await new Promise(resolve => setTimeout(resolve, 500));
 
     const conf = await confirmCandidate(best);
     if (!running || !scanActive) {
@@ -829,9 +833,18 @@
     }
 
     if (conf && conf.ok) {
-      save(LS_DIALOG, best.absRect);
-      learnTripleAnchorFromDialog(best.absRect);
-      learnBarTemplateFromDialog(best.absRect);
+      // Only learn template if confirmation was very strong (avoid learning from false positives).
+      if (conf.pb >= 0.40 && conf.moved >= 2) {
+        save(LS_DIALOG, best.absRect);
+        learnTripleAnchorFromDialog(best.absRect);
+        learnBarTemplateFromDialog(best.absRect);
+      } else {
+        // Weak confirmation - save dialog but don't learn template (might be wrong).
+        save(LS_DIALOG, best.absRect);
+        learnTripleAnchorFromDialog(best.absRect);
+        // Don't learn bar template from weak matches.
+        setStatus("Locked (weak match - template not learned)");
+      }
 
       const s = load(LS_MULTI);
       if (s && typeof s.Ax === "number" && typeof s.Ay === "number") {
