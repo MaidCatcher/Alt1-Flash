@@ -36,7 +36,7 @@
   const canvas = $("previewCanvas");
   const ctx = canvas ? canvas.getContext("2d", { willReadFrequently: true }) : null;
 
-  const APP_VERSION = "0.7.1";
+  const APP_VERSION = "0.6.21";
   const BUILD_ID = "final-" + Date.now();
 
   function setStatus(v) { if (statusEl) statusEl.textContent = v; }
@@ -543,6 +543,23 @@
     const bx = ax + s.dxB, by = ay + s.dyB;
     const cx = ax + s.dxC, cy = ay + s.dyC;
 
+    // Containment gate: predicted B/C must be inside the dialog bounds (with padding).
+    // This prevents false positives where A matches something but B/C land outside the actual dialog.
+    if (s.dialogW && s.dialogH && typeof s.Ax === "number" && typeof s.Ay === "number") {
+      const dialogX = ax - s.Ax;
+      const dialogY = ay - s.Ay;
+      const padIn = 10;
+
+      const inside = (x, y, w, h) =>
+        (x >= dialogX - padIn) &&
+        (y >= dialogY - padIn) &&
+        (x + w <= dialogX + s.dialogW + padIn) &&
+        (y + h <= dialogY + s.dialogH + padIn);
+
+      if (!inside(bx, by, s.B.w, s.B.h) || !inside(cx, cy, s.C.w, s.C.h)) return false;
+    }
+
+
     const pad = 8;
 
     const imgB = captureRegion(bx - pad, by - pad, s.B.w + pad * 2, s.B.h + pad * 2);
@@ -842,11 +859,9 @@
     setStatus("Cleared");
     setProgress("—");
   }
-
   // ---------------- Init UI ----------------
-  if (verEl) verEl.textContent = APP_VERSION;
-  if (buildEl) buildEl.textContent = BUILD_ID;
-  if (loadedAtEl) loadedAtEl.textContent = new Date().toLocaleString();
+  // Note: index.html owns the displayed version/build text.
+  // app.js no longer overwrites it.
 
   updateSavedLockLabel();
   setMode("Not running");
