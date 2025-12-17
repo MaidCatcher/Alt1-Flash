@@ -244,6 +244,9 @@
     confirmDelayMs: 180
   };
 
+  // High-level run state (set by Start/Stop buttons).
+  let running = false;
+
   let scanActive = false;
   let scanTimer = null;
 
