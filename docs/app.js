@@ -36,7 +36,7 @@
   const canvas = $("previewCanvas");
   const ctx = canvas ? canvas.getContext("2d", { willReadFrequently: true }) : null;
 
-  const APP_VERSION = "0.6.20";
+  const APP_VERSION = "0.7.1";
   const BUILD_ID = "final-" + Date.now();
 
   function setStatus(v) { if (statusEl) statusEl.textContent = v; }
