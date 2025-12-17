@@ -56,12 +56,15 @@ Progress: <span id="progress">—</span>
     <canvas id="previewCanvas" width="520" height="320"></canvas>
   </div>
 
-  <div style="margin-top:10px;"><b>Debug</b></div>
+  <div style="margin-top:10px;">
+    <b>Debug</b>
+    <button id="copyDebugBtn" style="margin-left:8px; font-size:11px;">Copy debug</button>
+  </div>
   <pre id="debugBox"></pre>
 
   <script>
     // Cache buster build id
-    window.APP_VERSION = "0.7.13";
+    window.APP_VERSION = "0.7.15";
     window.BUILD_ID = "build-" + Date.now();
 
     document.getElementById("appVersion").textContent = window.APP_VERSION;
@@ -87,6 +90,34 @@ Progress: <span id="progress">—</span>
       if (saved) el.value = saved;
       el.addEventListener("change", () => {
         try { localStorage.setItem(key, el.value); } catch {}
+      });
+    })();
+
+    // Copy all debug text to clipboard
+    (function initCopyDebug() {
+      const btn = document.getElementById("copyDebugBtn");
+      const dbg = document.getElementById("debugBox");
+      if (!btn || !dbg) return;
+      btn.addEventListener("click", async () => {
+        const text = dbg.textContent || "";
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text);
+          } else {
+            // Fallback for older environments
+            const ta = document.createElement("textarea");
+            ta.value = text;
+            ta.style.position = "fixed";
+            ta.style.opacity = "0";
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            try { document.execCommand("copy"); } catch {}
+            document.body.removeChild(ta);
+          }
+        } catch (e) {
+          console.error("Copy debug failed:", e);
+        }
       });
     })();
 

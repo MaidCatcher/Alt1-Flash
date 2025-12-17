@@ -367,7 +367,6 @@
       for (let y = 0; y <= th - rh; y += SCAN.step) {
         for (let x = 0; x <= tw - rw; x += SCAN.step) {
           const s = scoreDialogCandidate(tileImg, x, y, rw, rh);
-          if (s.pb < PB.minScore) continue;
 
           const c = {
             absRect: { x: tileImg._tileX + x, y: tileImg._tileY + y, w: rw, h: rh },
@@ -376,7 +375,9 @@
           };
           out.push(c);
 
-          if (s.comb >= SCAN.earlyExitComb) {
+          // Only trigger early confirm on reasonably strong candidates,
+          // but still keep weaker ones around for diagnostics.
+          if (s.pb >= PB.minScore && s.comb >= SCAN.earlyExitComb) {
             return { candidates: out, early: c };
           }
         }
