@@ -26,6 +26,7 @@
   const autoFindBtn = $("autoFindBtn");
   const clearLockBtn = $("clearLockBtn");
   const testFlashBtn = $("testFlashBtn");
+  const showLockOverlayBtn = $("showLockOverlayBtn");
 
   const savedLockEl = $("savedLock");
   const scanPresetEl = $("scanPreset");
@@ -673,6 +674,28 @@
     setProgress("—");
   }
 
+  function showLockOverlay() {
+    if (!window.alt1) {
+      setStatus("Alt1 missing");
+      return;
+    }
+    const dlg = load(LS_DIALOG);
+    if (dlg && typeof dlg.x === "number" && typeof dlg.y === "number" &&
+        typeof dlg.w === "number" && typeof dlg.h === "number") {
+      overlayRectRs(dlg.x, dlg.y, dlg.w, dlg.h, 1000);
+      setStatus("Showing locked dialog overlay");
+      return;
+    }
+    const lock = load(LS_LOCK);
+    if (lock && typeof lock.x === "number" && typeof lock.y === "number") {
+      // Fallback: draw a small box around the lock point if we don't have the dialog rect.
+      overlayRectRs(lock.x - 40, lock.y - 20, 80, 40, 1000);
+      setStatus("Showing lock point overlay");
+      return;
+    }
+    setStatus("No lock/dialog stored to show");
+  }
+
   function testFlash() {
     const now = !overlayEnabled();
     setOverlayEnabled(now);
@@ -713,6 +736,7 @@
   if (autoFindBtn) autoFindBtn.onclick = autoFind;
   if (clearLockBtn) clearLockBtn.onclick = clearLock;
   if (testFlashBtn) testFlashBtn.onclick = testFlash;
+  if (showLockOverlayBtn) showLockOverlayBtn.onclick = showLockOverlay;
 
   dbg({
     note: "app_final12: fallback scan restored (moving preview). Test flash toggles overlay mode to avoid minimize.",
