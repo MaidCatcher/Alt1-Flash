@@ -36,7 +36,7 @@
   const canvas = $("previewCanvas");
   const ctx = canvas ? canvas.getContext("2d", { willReadFrequently: true }) : null;
 
-  const APP_VERSION = "0.6.19";
+  const APP_VERSION = "0.6.20";
   const BUILD_ID = "final-" + Date.now();
 
   function setStatus(v) { if (statusEl) statusEl.textContent = v; }
@@ -243,41 +243,82 @@
   }
 
   function scoreProgressBar(img) {
-    // returns {score, y, xEdge} where xEdge is likely fill boundary
+    // Tight, dialog-relative progress bar locator.
+    // Restricts search to a fixed Y band and scores "bar-likeness" (two relatively-uniform segments with a single boundary).
     const w = img.width, h = img.height;
+
+    // Crafting dialog bar sits in a narrow vertical band; keep a little slack for scaling.
+    const yTop = Math.floor(h * 0.54);
+    const yBot = Math.floor(h * 0.64);
+
+    // Helper: band-averaged grayscale at x
+    function bandGray(x, y) {
+      let gsum = 0, cnt = 0;
+      for (let yy = -2; yy <= 2; yy++) {
+        const ry = clamp(y + yy, 0, h - 1);
+        const i = (ry * w + x) * 4;
+        gsum += toGray(img.data[i], img.data[i + 1], img.data[i + 2]);
+        cnt++;
+      }
+      return (gsum / cnt) | 0;
+    }
+
     let best = { score: 0, y: 0, xEdge: 0 };
 
-    // examine central vertical band
-    const yStart = Math.floor(h * 0.35);
-    const yEnd = Math.floor(h * 0.75);
+    // Iterate candidate rows in the band
+    for (let y = yTop; y <= yBot; y++) {
+      // Sample grayscale across the row (step 2 for speed)
+      const step = 2;
+      const xs = [];
+      const gs = [];
+      for (let x = 2; x < w - 2; x += step) {
+        xs.push(x);
+        gs.push(bandGray(x, y));
+      }
+      if (gs.length < 20) continue;
 
-    for (let y = yStart; y < yEnd; y++) {
-      // compute per-x gray and look for large step with stable band
-      let prev = 0;
-      let maxStep = 0;
-      let maxX = 0;
-
-      // sample a thin band (3px) average
-      for (let x = 4; x < w - 4; x++) {
-        let gsum = 0;
-        let cnt = 0;
-        for (let yy = -1; yy <= 1; yy++) {
-          const ry = clamp(y + yy, 0, h - 1);
-          const i = (ry * w + x) * 4;
-          gsum += toGray(img.data[i], img.data[i + 1], img.data[i + 2]);
-          cnt++;
-        }
-        const g = (gsum / cnt) | 0;
-        if (x > 4) {
-          const step = Math.abs(g - prev);
-          if (step > maxStep) { maxStep = step; maxX = x; }
-        }
-        prev = g;
+      // Find strongest single boundary (max gradient)
+      let maxGrad = 0;
+      let maxIdx = 0;
+      for (let i = 1; i < gs.length; i++) {
+        const grad = Math.abs(gs[i] - gs[i - 1]);
+        if (grad > maxGrad) { maxGrad = grad; maxIdx = i; }
       }
 
-      // normalize by width
-      const score = maxStep / 255;
-      if (score > best.score) best = { score, y, xEdge: maxX };
+      const xEdge = xs[maxIdx];
+
+      // Reject if boundary too close to ends (not a fill boundary)
+      const minFrac = 0.18;
+      const maxFrac = 0.90;
+      const frac = xEdge / Math.max(1, (w - 1));
+      if (frac < minFrac || frac > maxFrac) continue;
+
+      // "Uniformity" of left and right segments: average adjacent abs-diff normalized (lower is better).
+      function roughness(i0, i1) {
+        if (i1 - i0 < 3) return 1;
+        let s = 0, c = 0;
+        for (let i = i0 + 1; i < i1; i++) {
+          s += Math.abs(gs[i] - gs[i - 1]);
+          c++;
+        }
+        return c ? (s / c) / 255 : 1;
+      }
+
+      const rL = roughness(0, maxIdx);
+      const rR = roughness(maxIdx, gs.length);
+
+      // Step strength normalized
+      const stepScore = maxGrad / 255;
+
+      // Penalize noisy segments heavily; bar segments should be fairly flat.
+      const uniformScore = clamp(1.0 - (rL * 2.2 + rR * 2.2) / 2.0, 0, 1);
+
+      // Additional requirement: boundary spans a meaningful portion of width (bar-like)
+      const widthScore = clamp((frac - 0.15) / 0.35, 0, 1);
+
+      const score = stepScore * 0.65 + uniformScore * 0.25 + widthScore * 0.10;
+
+      if (score > best.score) best = { score, y, xEdge };
     }
 
     return best;
