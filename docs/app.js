@@ -296,28 +296,48 @@
 
   function scoreProgressBar(sub) {
     const w = sub.width, h = sub.height;
-    // Vertical band where we expect the green bar.
-    // Widened a bit to reduce misses on slightly shifted dialogs.
+    // Vertical band where we expect the bar (whatever its color is after Alt1's capture).
     const y0 = Math.floor(h * 0.40);
     const y1 = Math.floor(h * 0.75);
 
     let bestRow = { score: 0, y: Math.floor(h * 0.55), xEdge: 0 };
 
     for (let y = y0; y < y1; y += 2) {
-      let hits = 0, total = 0;
-      let lastHitX = 0;
+      const samples = [];
+      let sumR = 0, sumG = 0, sumB = 0;
 
       for (let x = Math.floor(w * 0.10); x < Math.floor(w * 0.90); x += 2) {
         const i = (y * w + x) * 4;
         const r = sub.data[i], g = sub.data[i + 1], b = sub.data[i + 2];
-        total++;
-        // Detect both classic green bars and bluish bars (e.g. different themes / accessibility modes).
-        const greenLike = (g > 110 && g > r + 18 && g > b + 18);
-        const blueLike  = (b > 110 && b > r + 18 && b > g + 8);
-        if (greenLike || blueLike) { hits++; lastHitX = x; }
+        samples.push({ x, r, g, b });
+        sumR += r; sumG += g; sumB += b;
       }
 
-      const score = total ? (hits / total) : 0;
+      const total = samples.length;
+      if (!total) continue;
+
+      const meanR = sumR / total;
+      const meanG = sumG / total;
+      const meanB = sumB / total;
+
+      // Treat pixels close to the dominant row color as "bar", regardless of hue.
+      // Threshold is fairly loose to cope with compression / lighting.
+      const distThreshSq = 55 * 55;
+
+      let hits = 0;
+      let lastHitX = 0;
+      for (const s of samples) {
+        const dr = s.r - meanR;
+        const dg = s.g - meanG;
+        const db = s.b - meanB;
+        const distSq = dr*dr + dg*dg + db*db;
+        if (distSq <= distThreshSq) {
+          hits++;
+          lastHitX = s.x;
+        }
+      }
+
+      const score = hits / total;
       if (score > bestRow.score) bestRow = { score, y, xEdge: lastHitX };
     }
 
