@@ -675,20 +675,49 @@
   }
 
   function showLockOverlay() {
+    const dlg = load(LS_DIALOG);
+    const lock = load(LS_LOCK);
+
+    // If overlay mode is OFF, only show the lock in the preview to avoid Alt1 minimizing.
+    if (!overlayEnabled()) {
+      if (dlg && typeof dlg.x === "number" && typeof dlg.y === "number" &&
+          typeof dlg.w === "number" && typeof dlg.h === "number") {
+        const img = captureRegion(dlg.x, dlg.y, dlg.w, dlg.h);
+        drawImageScaled(img, "LOCK PREVIEW (overlay OFF)", [
+          { x: 0, y: 0, w: dlg.w, h: dlg.h, color: "lime", label: "dialog" }
+        ]);
+        setStatus("Showing locked dialog in preview (overlay OFF)");
+        return;
+      }
+      if (lock && typeof lock.x === "number" && typeof lock.y === "number") {
+        const rx = Math.max(0, lock.x - 120);
+        const ry = Math.max(0, lock.y - 80);
+        const rw = 240, rh = 160;
+        const img = captureRegion(rx, ry, rw, rh);
+        const relX = lock.x - rx;
+        const relY = lock.y - ry;
+        drawImageScaled(img, "LOCK PREVIEW (overlay OFF)", [
+          { x: relX - 10, y: relY - 6, w: 20, h: 12, color: "lime", label: "lock" }
+        ]);
+        setStatus("Showing lock point in preview (overlay OFF)");
+        return;
+      }
+      setStatus("No lock/dialog stored to show");
+      return;
+    }
+
+    // Overlay mode ON: try real Alt1 overlay (may minimize on some setups).
     if (!window.alt1) {
       setStatus("Alt1 missing");
       return;
     }
-    const dlg = load(LS_DIALOG);
     if (dlg && typeof dlg.x === "number" && typeof dlg.y === "number" &&
         typeof dlg.w === "number" && typeof dlg.h === "number") {
       const ok = overlayRectRs(dlg.x, dlg.y, dlg.w, dlg.h, 1000);
       setStatus(ok ? "Showing locked dialog overlay" : "Overlay failed (check Alt1 overlay permission)");
       return;
     }
-    const lock = load(LS_LOCK);
     if (lock && typeof lock.x === "number" && typeof lock.y === "number") {
-      // Fallback: draw a small box around the lock point if we don't have the dialog rect.
       const ok = overlayRectRs(lock.x - 40, lock.y - 20, 80, 40, 1000);
       setStatus(ok ? "Showing lock point overlay" : "Overlay failed (check Alt1 overlay permission)");
       return;
