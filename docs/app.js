@@ -295,8 +295,10 @@
         const i = (y * w + x) * 4;
         const r = sub.data[i], g = sub.data[i + 1], b = sub.data[i + 2];
         total++;
-        const isGreen = (g > 120 && g > r + 25 && g > b + 25);
-        if (isGreen) { hits++; lastHitX = x; }
+        // Detect both classic green bars and bluish bars (e.g. different themes / accessibility modes).
+        const greenLike = (g > 110 && g > r + 18 && g > b + 18);
+        const blueLike  = (b > 110 && b > r + 18 && b > g + 8);
+        if (greenLike || blueLike) { hits++; lastHitX = x; }
       }
 
       const score = total ? (hits / total) : 0;
